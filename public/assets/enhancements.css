@@ -11,3 +11,10 @@
 .table-wrap .field-label{font-size:11px;color:var(--muted)}
 @media(forced-colors:active){.tag,.member-pill,.notice,.metric-card{border:1px solid CanvasText}.dot{border:1px solid CanvasText}}
 @media print{.tag,.member-pill,.metric-card{border:1px solid currentColor}.event-data{max-height:none;overflow:visible}}
+.date-control{flex-wrap:wrap}
+.filing-footer{display:flex;align-items:center;justify-content:center;flex-wrap:wrap;gap:10px 20px;padding:22px 16px;color:var(--muted);font-size:12px;text-align:center}
+.filing-footer[hidden]{display:none}
+.filing-footer a{display:inline-flex;align-items:center;gap:5px;color:var(--muted);overflow-wrap:anywhere}
+.filing-footer img{width:20px;height:20px;object-fit:contain;flex-shrink:0}
+.quick-entry-link{text-align:center;border-top:1px solid var(--line);padding-top:18px;margin-top:8px}
+.quick-entry-link p{margin:6px 0 0}

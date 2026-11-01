@@ -39,6 +39,8 @@ server {
     }
 
     location = /api/index.php {
+        # API errors must remain JSON even if a parent config intercepts errors.
+        fastcgi_intercept_errors off;
         include fastcgi_params;
         fastcgi_param SCRIPT_FILENAME $document_root/api/index.php;
         fastcgi_param HTTPS on;

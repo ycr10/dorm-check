@@ -5,7 +5,7 @@
   const $ = (selector, node = document) => node.querySelector(selector);
   const app = $('#app');
   const modal = $('#modal');
-  const state = { user: null, csrf: '', date: '', serverTime: '', route: '', generation: 0, poll: null, roster: null, tasks: [], settings: {}, authTab: 'login', refreshAt: '', busy: false, config: {}, filters: {} };
+  const state = { user: null, csrf: '', date: '', datePinned: false, preparedAt: 0, serverTime: '', route: '', generation: 0, poll: null, roster: null, tasks: [], settings: {}, authTab: 'login', refreshAt: '', busy: false, config: {}, filters: {} };
   const paths = {
     moon: 'M20.9 13.3A9 9 0 0 1 10.7 3.1 9 9 0 1 0 20.9 13.3Z',
     home: 'm3 10 9-7 9 7v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V10Z M9 21v-8h6v8',
@@ -83,13 +83,17 @@
   function isManager() { return isAdmin() || roles().some(v => ['committee', 'counselor', 'manager', 'monitor', 'secretary'].includes(v)); }
   function needsMfa() { return !!(state.user?.totp_required && !state.user?.totp_enabled); }
   function roleName() { return isAdmin() ? '系统管理员' : isManager() ? '班委管理' : '寝室长'; }
-  function dateValue(value = state.serverTime) { try { const raw = value || Date.now(); const normalized = typeof raw === 'string' && /^\d{4}-\d{2}-\d{2} /.test(raw) ? raw.replace(' ', 'T') + '+08:00' : raw; return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(normalized)); } catch { return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai' }).format(new Date()); } }
+  function dateValue(value = state.serverTime, subtractHours = 0) { try { const raw = value || Date.now(); const normalized = typeof raw === 'string' && /^\d{4}-\d{2}-\d{2} /.test(raw) ? raw.replace(' ', 'T') + '+08:00' : raw; return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(new Date(normalized).getTime() - subtractHours * 3600000)); } catch { return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai' }).format(new Date(Date.now() - subtractHours * 3600000)); } }
+  function businessDateValue(value = state.serverTime) { return dateValue(value, 8); }
   function dateLabel(value = state.date) { if (!value) return ''; const d = new Date(`${value}T12:00:00+08:00`); return new Intl.DateTimeFormat('zh-CN', { month: 'long', day: 'numeric', weekday: 'long', timeZone: 'Asia/Shanghai' }).format(d); }
   function timeLabel(value, full = false) { if (!value) return '—'; const normalized = String(value).includes('T') ? value : String(value).replace(' ', 'T') + (/[zZ]|[+-]\d\d:\d\d$/.test(String(value)) ? '' : '+08:00'); const d = new Date(normalized); if (Number.isNaN(d.getTime())) return String(value); return new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', ...(full ? { year: 'numeric', month: '2-digit', day: '2-digit', second: '2-digit' } : {}), hour: '2-digit', minute: '2-digit', hour12: false }).format(d); }
   function roomName(task) { return task.room_name || task.room_label || [task.building || task.building_name, task.room_no || task.room_number].filter(Boolean).join(' · ') || (typeof task.room === 'string' ? task.room : task.room?.name || task.room?.room_no) || `寝室 ${task.room_id || task.id}`; }
   function nameOf(member) { return member.name || member.student_name || '未命名同学'; }
   function person(member) { const name = nameOf(member); return el('div', { class: 'person-cell' }, text('span', name.slice(-2), 'avatar'), el('div', {}, text('strong', name), text('span', member.student_no || ''))); }
-  function pageHeader(title, subtitle, kicker = '', date = true) { const right = date ? el('div', { class: 'date-control' }, text('label', '查寝日期'), input('date', { value: state.date, 'aria-label': '查寝日期', onchange: e => { state.date = e.target.value || dateValue(); loadRoute(); } })) : null; return el('header', { class: 'page-header' }, el('div', {}, kicker ? text('div', kicker, 'page-kicker') : null, text('h1', title), text('p', subtitle, 'subtitle')), right); }
+  function pageHeader(title, subtitle, kicker = '', date = true) {
+    const right = date ? el('div', { class: 'date-control' }, text('label', '查寝日期（仅该日）'), input('date', { value: state.date, 'aria-label': '查寝日期', onchange: e => { state.datePinned = !!e.target.value; state.date = e.target.value || businessDateValue(); loadRoute(); } }), button('恢复默认', () => { state.datePinned = false; state.preparedAt = 0; loadRoute(); }, 'soft small')) : null;
+    return el('header', { class: 'page-header' }, el('div', {}, kicker ? text('div', kicker, 'page-kicker') : null, text('h1', title), text('p', subtitle, 'subtitle')), right);
+  }
   function toast(message, error = false) { const node = el('div', { class: `toast ${error ? 'error' : ''}`, role: 'status' }, icon(error ? 'warning' : 'check'), text('span', message)); $('#toasts').append(node); setTimeout(() => node.remove(), error ? 8000 : 4500); }
   function showError(target, error) { if (!target?.isConnected) { toast(error.message || String(error), true); return; } const old = $('.error-box', target); if (old) old.remove(); const box = text('div', error.message || String(error), 'error-box'); box.setAttribute('role', 'alert'); target.prepend(box); }
   function errorMessage(body, fallback = '请求未完成，请稍后重试。') { return typeof body?.error === 'string' ? body.error : body?.error?.message || body?.message || fallback; }
@@ -137,7 +141,7 @@
   function brand() { return el('div', { class: 'brand' }, el('span', { class: 'brand-mark' }, icon('moon')), el('span', {}, '归寝', text('small', 'NIGHT CHECK'))); }
   function toggleTheme() { const dark = document.documentElement.dataset.theme === 'dark' || (!document.documentElement.dataset.theme && matchMedia('(prefers-color-scheme:dark)').matches); const theme = dark ? 'light' : 'dark'; document.documentElement.dataset.theme = theme; try { localStorage.setItem('dorm-theme', theme); } catch {} }
 
-  function clearPrivateState() { state.user = null; state.roster = null; state.tasks = []; state.settings = {}; state.filters = {}; state.generation++; clearInterval(state.poll); closeModal(); }
+  function clearPrivateState() { state.user = null; state.roster = null; state.tasks = []; state.settings = {}; state.filters = {}; state.datePinned = false; state.preparedAt = 0; state.generation++; clearInterval(state.poll); closeModal(); }
   function renderAuth(tab = 'login') {
     clearPrivateState(); state.authTab = tab; app.setAttribute('aria-busy', 'false');
     const page = el('div', { class: 'auth-page' });
@@ -179,7 +183,7 @@
         } catch (error) { if (['TOTP_REQUIRED', 'MFA_REQUIRED'].includes(error.code)) { otpField.hidden = false; otp.required = true; otp.focus(); } showError(form, error); }
       });
     });
-    card.append(form); page.append(el('main', { id: 'main', class: 'auth-content' }, story, card), el('footer', { class: 'auth-bottom' }, text('span', '归寝 · 班级晚间查寝'), text('span', '学号登录 · 最小授权 · 操作留痕')));
+    card.append(form, el('div', { class: 'quick-entry-link' }, el('a', { href: 'quick.html' }, '寝室长便捷登记 →'), text('p', '无需登录；学号和寝室号不能验证身份，请据实登记。', 'caption'))); page.append(el('main', { id: 'main', class: 'auth-content' }, story, card), el('footer', { class: 'auth-bottom' }, text('span', '归寝 · 班级晚间查寝'), text('span', '学号登录 · 最小授权 · 操作留痕')));
     app.replaceChildren(page);
   }
 
@@ -212,6 +216,13 @@
     const main = $('#main'); if (!main) return;
     if (!passive) main.replaceChildren(el('div', { class: 'empty-state' }, el('span', { class: 'spinner' }), text('p', '正在读取最新信息…')));
     try {
+      if (!state.datePinned && ['dashboard', 'today', 'followups', 'reports'].includes(route)) {
+        if (Date.now() - state.preparedAt >= 60000) {
+          const prepared = await api('prepare_today', {}, { passive });
+          if (!state.user || generation !== state.generation) return;
+          state.preparedAt = Date.now(); state.date = prepared.business_date;
+        } else if (state.serverTime) state.date = businessDateValue();
+      }
       const views = { dashboard: viewDashboard, today: viewToday, followups: viewFollowups, reports: viewReports, roster: viewRoster, settings: viewSettings, audit: viewAudit, account: viewAccount };
       const node = await views[route]({ passive }); if (!state.user || generation !== state.generation) return;
       main.replaceChildren(node); state.refreshAt = new Date().toISOString();
@@ -260,7 +271,7 @@
   try { const storedTheme = localStorage.getItem('dorm-theme'); if (storedTheme === 'light' || storedTheme === 'dark') document.documentElement.dataset.theme = storedTheme; } catch {}
 
   // init 在所有页面函数定义完成后执行。
-  async function init() { try { const data = await api('session'); state.user = data.user || null; state.date = dateValue(); if (state.user) { renderShell(); loadRoute(); } else renderAuth('login'); } catch (error) { renderAuth('login'); const form = $('form'); if (form) showError(form, error); } }
+  async function init() { try { const data = await api('session'); state.user = data.user || null; state.date = businessDateValue(); if (state.user) { renderShell(); loadRoute(); } else renderAuth('login'); } catch (error) { renderAuth('login'); const form = $('form'); if (form) showError(form, error); } }
 
   function metricCards(metrics = {}) {
     const items = [['present', '已在寝', 'green', '已确认安全返寝', 'home'], ['away', '外出未归', 'orange', '仍需跟进返寝', 'clock'], ['exempt', '无需返寝', '', '已核实的请假安排', 'shield'], ['unknown', '待核实', 'red', '需要进一步确认', 'help'], ['unreported', '未登记', '', '尚未收到有效申报', 'file']];
@@ -290,7 +301,7 @@
 
   async function viewDashboard(options = {}) {
     const data = await api('dashboard', null, { query: { date: state.date }, passive: options.passive }); const metrics = data.metrics || {}; const rooms = array(data.rooms); const people = array(data.people); state.tasks = array(data.tasks);
-    const wrap = el('div', {}, pageHeader('今晚，每个人都安心归寝。', '集中查看登记进度，及时联系未归和待核实的同学。', 'TONIGHT AT A GLANCE'));
+    const wrap = el('div', {}, pageHeader('查寝情况总览', '集中查看所选日期的登记进度与待核实情况。', 'NIGHT CHECK OVERVIEW'));
     const submitted = metrics.rooms_submitted ?? metrics.submitted_rooms ?? 0; const total = metrics.rooms_total ?? metrics.expected_rooms ?? rooms.length;
     wrap.append(el('section', { class: 'hero-card' }, el('div', { class: 'hero-text' }, text('h2', `${dateLabel()} · 晚间查寝`), text('p', total && submitted === total ? '各寝室已完成初报。请继续关注尚未返寝和待核实的同学。' : `每天 ${state.config.check_time || '22:30'} 据实登记。后续返寝可持续补报，原始情况会保留。`)), el('div', { class: 'hero-side' }, el('div', { class: 'count-display mono' }, `${submitted}/${total}`, text('small', '寝室已完成初报')), el('span', { class: 'hero-symbol' }, icon('moon')))), metricCards(metrics));
     wrap.append(notice(`${data.arrival_summary || '以已收到的申报为准'} · 数据截至 ${timeLabel(data.as_of, true)}`, 'neutral'));
@@ -300,7 +311,7 @@
       const task = array(data.tasks).find(t => String(t.room_id) === String(room.room_id || room.id)); const counts = room.metrics || room.counts || {}; const isReported = !!(room.submitted_at || room.submitted || room.reported);
       const current = room.summary || `${counts.present ?? room.present ?? 0} 人在寝${(counts.away ?? room.away ?? 0) ? ` · ${counts.away ?? room.away} 人未归` : ''}`;
       return row(el('strong', {}, roomName(room)), room.leader_name || room.responsible_name || room.leader || '待分配', tag(room.roster_empty ? '已移出本晚范围' : room.late ? '迟报' : isReported ? '已提交' : '未提交', room.roster_empty ? '' : room.late ? 'orange' : isReported ? 'green' : ''), current, text('span', timeLabel(room.updated_at || room.submitted_at), 'mono'), button('查看', () => task ? taskModal(task) : peopleModal(people.filter(p => String(p.room_id) === String(room.room_id || room.id)), roomName(room)), 'soft small'));
-    })) : empty('还没有当晚寝室信息', '导入名单并分配寝室后，系统会建立当晚查寝任务。', isAdmin() ? button('导入名单', () => navigate('roster'), '', 'upload') : null));
+    })) : empty('还没有当晚寝室信息', '请先检查所选日期、名单与计划任务状态；已有名单不需要每天重新上传。', isAdmin() ? button('查看名单', () => navigate('roster'), '', 'people') : null));
     roomPanel.node.append(refreshFooter()); wrap.append(roomPanel.node);
     const split = el('div', { class: 'split-grid' }); const focus = panel('需要关心的同学', '未归、待核实和缺报分别展示。', button('跟进处理', () => navigate('followups'), 'secondary small', 'arrow'));
     const pending = people.filter(p => ['away', 'unknown', 'unreported'].includes(p.current_status || p.status)).slice(0, 6);
@@ -309,17 +320,17 @@
   }
 
   async function viewToday(options = {}) {
-    const data = await api('tasks', null, { query: { date: state.date }, passive: options.passive }); const tasks = [...array(data.tasks), ...array(data.open_tasks)]; state.tasks = tasks;
-    const wrap = el('div', {}, pageHeader('我的查寝', '核实每位同学的情况，完成今晚登记；有人返寝时，随时补报。', 'MY NIGHT CHECK'));
+    const data = await api('tasks', null, { query: { date: state.date }, passive: options.passive }); const tasks = array(data.tasks); state.tasks = tasks;
+    const wrap = el('div', {}, pageHeader('我的查寝', '核实所选日期的成员情况；有人返寝时可在原日期补报。', 'MY NIGHT CHECK'));
     if (String(data.server_time || '').slice(0, 10) === state.date && String(data.server_time || '').slice(11, 16) >= (data.reminder_time || '22:25') && tasks.some(t => t.phase === 'draft')) wrap.append(notice(`准备提醒：请在 ${data.check_time || '22:30'} 重新逐人核实并正式提交；草稿不计作初报。`, 'neutral'));
-    const box = panel('本晚与未结项的旧晚任务', '仅显示你当前获授权的寝室与任务；每张卡片标明归属日期。'); box.body.remove();
+    const box = panel('所选日期的查寝任务', '仅显示所选日期、当前获授权的寝室与任务；旧晚记录请切换日期。'); box.body.remove();
     if (!tasks.length) box.node.append(empty('当前没有可登记的寝室', '可能尚未分配管理范围，或该日期没有任务。请联系班委核对；旧晚补报请切换查寝日期。', null, 'home'));
     tasks.forEach(task => {
       const members = array(task.members); const submitted = !!task.submitted_at; const pending = members.filter(m => ['away', 'unknown'].includes(m.current_status || m.status)); const closed = task.phase === 'closed'; const paused = task.phase === 'paused';
       const card = el('article', { class: 'task-card' }, el('div', { class: 'task-title' }, el('div', {}, text('h3', roomName(task)), el('div', { class: 'task-meta' }, text('span', `${task.business_date || state.date} 晚`), text('span', `${members.length} 位同学`), task.submitted_at ? text('span', `初报 ${timeLabel(task.submitted_at)}`) : text('span', `${timeLabel(task.check_at)} 开放正式登记`))), tag(task.roster_empty ? '已移出本晚范围' : closed ? '已结项' : paused ? '已暂停' : task.phase === 'draft' ? '准备中' : task.late ? '已迟报' : submitted ? '已提交' : '待登记', closed ? 'green' : paused ? '' : submitted ? 'blue' : 'orange')));
       card.append(el('div', { class: 'member-summary' }, members.map(m => { const status = m.current_status || m.status || 'unreported'; return el('span', { class: 'member-pill' }, el('span', { class: `dot ${statusMap[status]?.[1] || ''}` }), nameOf(m), text('span', ` · ${statusMap[status]?.[0] || status}`, 'muted')); })));
       const actions = el('div', { class: 'button-row' });
-      if (!submitted && !closed && !paused) { const b = button(task.phase === 'draft' ? '查看并准备登记' : '开始今晚登记', () => initialModal(task), '', 'edit'); actions.append(b); }
+      if (!submitted && !closed && !paused) { const b = button(task.phase === 'draft' ? '查看并准备登记' : '开始登记', () => initialModal(task), '', 'edit'); actions.append(b); }
       if (submitted && !closed && !paused) actions.append(button(pending.length ? `补报返寝 · ${pending.length} 人待确认` : '更新人员情况', () => updateModal(task), pending.length ? '' : 'secondary', 'check'));
       actions.append(button('查看本晚记录', () => taskModal(task), 'secondary', 'file'));
       if (submitted && !closed && !paused) actions.append(button('更正误填', () => correctionModal(task), 'secondary small', 'edit'));
@@ -335,7 +346,7 @@
     const members = array(task.members); const phaseDraft = task.phase === 'draft'; const form = el('form'); const edits = []; const checkLabel = timeLabel(task.check_at);
     form.append(notice(phaseDraft ? `当前尚未开放正式登记。可以保存在线草稿，${checkLabel} 后重新核实并提交。` : `请申报 ${checkLabel} 时的实际情况；后来发生的变化另填当前状态。`, phaseDraft ? 'warning' : 'neutral'));
     if (saved) form.append(notice(saved.stale ? '旧草稿对应的名册已变化，未自动恢复，请逐人重新核对。' : `已恢复本人 ${timeLabel(saved.updated_at, true)} 保存的在线草稿；仍需重新核实。`, saved.stale ? 'warning' : 'neutral'));
-    function reopen() { openModal(`${roomName(task)} · 今晚登记`, `${task.business_date || state.date} 晚 · 逐人核实`, form, true); }
+    function reopen() { openModal(`${roomName(task)} · 查寝登记`, `${task.business_date || state.date} 晚 · 逐人核实`, form, true); }
     const allButton = button('核实后批量设为在寝', async () => { const approved = await confirmAction('确认成员均已在寝', `请确认以下尚未初报的同学在 ${checkLabel} 均已在寝：${edits.filter(e => !e.immutable).map(e => nameOf(e.member)).join('、')}。`, '确认并填写'); if (approved) edits.filter(e => !e.immutable).forEach(item => { item.status.value = 'present'; item.current.value = ''; item.location.value = ''; item.currentLocation.value = ''; item.toggle(); }); reopen(); }, 'soft small', 'check');
     form.append(el('div', { class: 'button-row' }, allButton));
     const t = el('table', {}, el('thead', {}, row('同学', `${checkLabel} 时状态`, '去向 / 预计返寝', '当前变化 / 发生时间')), el('tbody'));
@@ -463,10 +474,29 @@
   function secretModal(title, subtitle, code, expires, kind = '一次性凭据') { const content = el('div', {}, notice(`请在核实本人后单独交付${kind}。不要发到群里。`, 'warning'), text('div', code || '服务器未返回凭据，请联系维护人员检查。', 'code-box'), text('p', expires ? `有效期至 ${expires}` : '凭据按服务器设定期限失效。', 'caption'), el('div', { class: 'modal-foot' }, button('复制凭据', () => copyText(code || ''), 'secondary', 'clipboard'), button('我已安全交付', closeModal))); openModal(title, subtitle, content); }
   async function resetUser(user) { if (!await confirmAction('重置个人账号', `请先核实 ${user.name || user.student_no} 本人。生成新重置码后，按系统规则撤销旧凭据和会话。`, '生成重置码')) return; try { const result = await secure('user_reset', { user_id: user.id }); secretModal('重置码已生成', `${user.name || ''} · ${user.student_no}`, result.reset_code, result.expires_at, '重置码'); } catch (error) { if (!error.silent) toast(error.message, true); } }
   async function toggleUser(user) { const disabled = user.status !== 'disabled'; if (!await confirmAction(disabled ? '停用账号' : '启用账号', disabled ? '停用后，现有登录状态也不能继续访问。历史操作仍保留。' : '确认此账号仍由已核实的本人持有。', disabled ? '确认停用' : '确认启用', disabled)) return; try { await secure('user_status', { user_id: user.id, status: disabled ? 'disabled' : 'active' }); toast(disabled ? '账号已停用。' : '账号已启用。'); loadRoute(); } catch (error) { if (!error.silent) toast(error.message, true); } }
-  function grantModal(user, rooms) { if (!array(rooms).length) { toast('请先导入含楼栋和寝室号的名单。', true); return; } const room = select(array(rooms).map(r => [r.id || r.room_id, roomName(r)]), rooms[0]?.id || rooms[0]?.room_id); const from = input('date', { value: state.date, required: true }); const to = input('date'); const task = input('text', { placeholder: '普通授权留空；旧晚交接填指定任务 ID' }); const form = el('form', {}, notice('代理也使用自己的账号。授权范围和生效时间会留痕，撤销后立即失效。', 'neutral'), field('负责寝室', room), el('div', { class: 'form-grid' }, field('生效日期', from), field('到期日期（选填）', to)), field('指定旧晚任务（选填）', task, '用于交接未结项旧任务，填写完整任务 ID。')); const submit = el('button', { type: 'submit', class: 'button' }, '保存授权'); form.append(el('div', { class: 'modal-foot' }, button('取消', closeModal, 'secondary'), submit)); form.addEventListener('submit', async e => { e.preventDefault(); await busy(submit, async () => { try { await secure('grant_save', { user_id: user.id, room_id: room.value, valid_from: from.value, valid_to: to.value || null, task_id: task.value.trim() || null }); closeModal(); toast('管理范围已保存。'); loadRoute(); } catch (error) { if (!error.silent) showError(form, error); } }); }); openModal(`分配范围 · ${user.name || user.student_no}`, '角色权限不能通过寝室授权提升。', form); }
+  function grantModal(user, rooms) { if (!array(rooms).length) { toast('请先导入含楼栋和寝室号的名单。', true); return; } const room = select(array(rooms).map(r => [r.id || r.room_id, roomName(r)]), rooms[0]?.id || rooms[0]?.room_id); const from = input('date', { value: dateValue(), required: true }); const to = input('date'); const task = input('text', { placeholder: '普通授权留空；旧晚交接填指定任务 ID' }); const form = el('form', {}, notice('代理也使用自己的账号。授权范围和生效时间会留痕，撤销后立即失效。', 'neutral'), field('负责寝室', room), el('div', { class: 'form-grid' }, field('生效日期', from), field('到期日期（选填）', to)), field('指定旧晚任务（选填）', task, '用于交接未结项旧任务，填写完整任务 ID。')); const submit = el('button', { type: 'submit', class: 'button' }, '保存授权'); form.append(el('div', { class: 'modal-foot' }, button('取消', closeModal, 'secondary'), submit)); form.addEventListener('submit', async e => { e.preventDefault(); await busy(submit, async () => { try { await secure('grant_save', { user_id: user.id, room_id: room.value, valid_from: from.value, valid_to: to.value || null, task_id: task.value.trim() || null }); closeModal(); toast('管理范围已保存。'); loadRoute(); } catch (error) { if (!error.silent) showError(form, error); } }); }); openModal(`分配范围 · ${user.name || user.student_no}`, '角色权限不能通过寝室授权提升。', form); }
   function exemptionModal(member = null) { const students = array(state.roster?.students); if (!students.length) { toast('请先导入学生名单。', true); return; } const student = select(students.map(s => [s.id || s.student_id, `${nameOf(s)} · ${s.student_no || ''}`]), member?.id || member?.student_id || students[0]?.id); const start = input('date', { value: state.date, required: true }); const end = input('date', { value: state.date, required: true }); const source = input('text', { required: true, maxlength: 200, placeholder: '如：已核实的辅导员请假许可' }); const note = el('textarea', { maxlength: 500, placeholder: '仅填写处理所需的简要说明，不填写详细病情等无关信息。' }); const verified = el('input', { type: 'checkbox', required: true }); const form = el('form', {}, field('同学', student), el('div', { class: 'form-grid' }, field('开始日期', start), field('结束日期', end)), field('确认来源', source), field('简要说明（选填）', note), el('label', { class: 'checkbox' }, verified, '我已核实该安排有效；本系统登记不代替学校正式审批。')); const submit = el('button', { type: 'submit', class: 'button' }, '保存已核实安排'); form.append(el('div', { class: 'modal-foot' }, button('取消', closeModal, 'secondary'), submit)); form.addEventListener('submit', async e => { e.preventDefault(); await busy(submit, async () => { try { await api('exemption_save', { student_id: student.value, start_date: start.value, end_date: end.value, source: source.value.trim(), note: note.value.trim(), approved: true }); closeModal(); toast('已保存当晚返寝安排。'); loadRoute(); } catch (error) { showError(form, error); } }); }); openModal('登记请假 / 特殊住宿安排', '仅登记已核实的当晚返寝例外。', form); }
 
-  async function viewSettings() { const data = await api('settings'); const settings = data.settings || data; state.settings = settings; const wrap = el('div', {}, pageHeader('系统设置', '设置班级、每日时间与暂停日期。所有时间均为北京时间。', 'SYSTEM SETTINGS', false)); const group = panel('每日查寝规则', '时间调整不会静默改写已经保存的历史日报。'); group.body.classList.add('padded'); const className = input('text', { value: settings.class_name || '', required: true, maxlength: 100 }); const check = input('time', { value: String(settings.check_time || '22:30').slice(0, 5), required: true }); const due = input('time', { value: String(settings.due_time || '22:35').slice(0, 5), required: true }); const reminder = input('time', { value: String(settings.reminder_time || '22:25').slice(0, 5) }); const retention = input('number', { value: settings.retention_days || 180, min: 1, max: 3650, required: true }); const paused = el('textarea', { rows: 4, placeholder: '每行一个 YYYY-MM-DD 日期' }, array(settings.paused_dates).join('\n')); const form = el('form', {}, field('班级名称', className), el('div', { class: 'form-grid' }, field('查寝时点', check, '初报对应这个时点的情况。'), field('正常提交截止', due, '超过后首次提交标记为迟报。'), field('准备提醒时间', reminder, '首版为站内提醒，网页关闭后不保证送达。')), field('暂停查寝日期', paused, '每行一个日期；节假日或整班活动可在此设置。'), field('业务记录建议保留天数', retention, '此设置用于 CLI prune 的默认截止日期。删除必须先备份并显式确认，不会静默清理。'), notice('实际自动任务由服务器执行。请按部署文档配置计划任务，并定期检查执行结果。', 'neutral')); const submit = el('button', { type: 'submit', class: 'button' }, '保存设置'); form.append(el('div', { class: 'button-row end' }, submit)); form.addEventListener('submit', async e => { e.preventDefault(); const dates = paused.value.split(/[\s,，]+/).filter(Boolean); if (dates.some(d => !/^\d{4}-\d{2}-\d{2}$/.test(d))) { showError(form, new Error('暂停日期请使用 YYYY-MM-DD 格式，每行一个。')); return; } await busy(submit, async () => { try { await secure('settings_save', { settings: { class_name: className.value.trim(), check_time: check.value, due_time: due.value, reminder_time: reminder.value, paused_dates: dates, retention_days: Number(retention.value) } }); state.config.check_time = check.value; const clock = $('.clock-chip span'); if (clock) clock.textContent = `北京时间 · 每晚 ${check.value}`; toast('系统设置已保存。'); } catch (error) { if (!error.silent) showError(form, error); } }); }); group.body.append(form); wrap.append(group.node, totpSettings(settings), jobStatus(array(data.job_runs))); return wrap; }
+  async function viewSettings() { const data = await api('settings'); const settings = data.settings || data; state.settings = settings; const wrap = el('div', {}, pageHeader('系统设置', '设置班级、每日时间与暂停日期。所有时间均为北京时间。', 'SYSTEM SETTINGS', false)); const group = panel('每日查寝规则', '时间调整不会静默改写已经保存的历史日报。'); group.body.classList.add('padded'); const className = input('text', { value: settings.class_name || '', required: true, maxlength: 100 }); const check = input('time', { value: String(settings.check_time || '22:30').slice(0, 5), required: true }); const due = input('time', { value: String(settings.due_time || '22:35').slice(0, 5), required: true }); const reminder = input('time', { value: String(settings.reminder_time || '22:25').slice(0, 5) }); const retention = input('number', { value: settings.retention_days || 180, min: 1, max: 3650, required: true }); const paused = el('textarea', { rows: 4, placeholder: '每行一个 YYYY-MM-DD 日期' }, array(settings.paused_dates).join('\n')); const form = el('form', {}, field('班级名称', className), el('div', { class: 'form-grid' }, field('查寝时点', check, '初报对应这个时点的情况。'), field('正常提交截止', due, '超过后首次提交标记为迟报。'), field('准备提醒时间', reminder, '首版为站内提醒，网页关闭后不保证送达。')), field('暂停查寝日期', paused, '每行一个日期；节假日或整班活动可在此设置。'), field('业务记录建议保留天数', retention, '此设置用于 CLI prune 的默认截止日期。删除必须先备份并显式确认，不会静默清理。'), notice('实际自动任务由服务器执行。请按部署文档配置计划任务，并定期检查执行结果。', 'neutral')); const submit = el('button', { type: 'submit', class: 'button' }, '保存设置'); form.append(el('div', { class: 'button-row end' }, submit)); form.addEventListener('submit', async e => { e.preventDefault(); const dates = paused.value.split(/[\s,，]+/).filter(Boolean); if (dates.some(d => !/^\d{4}-\d{2}-\d{2}$/.test(d))) { showError(form, new Error('暂停日期请使用 YYYY-MM-DD 格式，每行一个。')); return; } await busy(submit, async () => { try { await secure('settings_save', { settings: { class_name: className.value.trim(), check_time: check.value, due_time: due.value, reminder_time: reminder.value, paused_dates: dates, retention_days: Number(retention.value) } }); state.config.check_time = check.value; const clock = $('.clock-chip span'); if (clock) clock.textContent = `北京时间 · 每晚 ${check.value}`; toast('系统设置已保存。'); } catch (error) { if (!error.silent) showError(form, error); } }); }); group.body.append(form); wrap.append(group.node, filingSettings(settings), totpSettings(settings), jobStatus(array(data.job_runs))); return wrap; }
+  function filingSettings(settings) {
+    const group = panel('网站备案信息', '填写后在登录页、后台及便捷登记页显示；默认留空，需由网站运营者核对备案。');
+    group.body.classList.add('padded');
+    const icp = input('text', { value: settings.filing_icp || '', maxlength: 100, autocomplete: 'off', placeholder: '填写完整 ICP 备案号' });
+    const police = input('text', { value: settings.filing_police || '', maxlength: 100, autocomplete: 'off', placeholder: '填写完整公安备案号' });
+    const form = el('form', {}, field('ICP 备案号', icp, '留空则不显示；链接到工信部备案查询。'), field('公安备案号', police, '填写完整文字，例如“京公网安备11000000000000号”；系统从中提取数字生成查询链接。留空则不显示。'), notice('请在备案平台核对号码、域名、主体和官方查询链接；空白或读取失败时页面不会显示备案信息。', 'warning'));
+    const submit = el('button', { type: 'submit', class: 'button' }, '保存备案信息');
+    form.append(el('div', { class: 'button-row end' }, submit));
+    form.addEventListener('submit', async e => {
+      e.preventDefault();
+      await busy(submit, async () => {
+        try {
+          const result = await secure('settings_save', { settings: { filing_icp: icp.value.trim(), filing_police: police.value.trim() } });
+          state.settings = result.settings; await window.refreshFiling?.(); toast('备案信息已保存。');
+        } catch (error) { if (!error.silent) showError(form, error); }
+      });
+    });
+    group.body.append(form); return group.node;
+  }
   function totpSettings(settings) {
     const configured = typeof settings.totp_student_no === 'string';
     const group = panel('两步验证账号', '按登录学号指定唯一账号，不改变账号角色及寝室授权。'); group.body.classList.add('padded');

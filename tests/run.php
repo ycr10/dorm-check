@@ -448,6 +448,182 @@ test('TOTP policy changes roll back the setting, credentials and session version
     check($failed,'synthetic database failure did not occur'); same(Schema::get($f->db,'totp_student_no'),null); same(Support::all($f->db,'SELECT id,auth_version,totp_enabled FROM users ORDER BY id'),$before);
 });
 
+test('quick lookup uses the dorm roster without a login account and does not expose other rooms or private records',function (Fixture $f): void {
+    $f->open(); Support::exec($f->db,'DELETE FROM users WHERE id=?',[$f->a['id']]);
+    $r=$f->domain->quick('quick_lookup',['student_no'=>'00100001','room_number'=>'001'],'192.0.2.1');
+    same($r['task']['business_date'],'2026-10-29'); same(count($r['task']['members']),2);
+    same(array_column($r['task']['members'],'name'),['虚构寝室长甲','=1+1']);
+    check(!str_contains(Support::json($r),'00100003'),'other room leaked');
+    check(!array_key_exists('student_no',$r['task']['members'][0]),'member student number leaked');
+    check(!array_key_exists('exemption_json',$r['task']['members'][0]),'exemption details leaked');
+    rejects(fn()=> $f->domain->quick('quick_lookup',['student_no'=>'00100001','room_number'=>'002'],'192.0.2.2'),'QUICK_NOT_FOUND');
+    rejects(fn()=> $f->domain->quick('quick_lookup',['student_no'=>'00100002','room_number'=>'001'],'192.0.2.3'),'QUICK_NOT_FOUND');
+    rejects(fn()=> $f->domain->quick('quick_lookup',['student_no'=>'00100001','room_number'=>'1'],'192.0.2.4'),'QUICK_NOT_FOUND');
+});
+test('quick initial is atomic, records unverified identity, and replays the same submission safely',function (Fixture $f): void {
+    $f->open(); $identity=['student_no'=>'00100001','room_number'=>'001']; $t=$f->domain->quick('quick_lookup',$identity,'192.0.2.1')['task'];
+    $members=array_map(fn($m)=>['student_id'=>$m['student_id'],'status'=>'present','location'=>''],$t['members']);
+    $p=$identity+['version'=>$t['version'],'roster_version'=>$t['roster_version'],'idempotency_key'=>'quick-test-000001','members'=>$members];
+    $bad=$p; $bad['members'][1]['status']='away'; rejects(fn()=> $f->domain->quick('quick_initial',$bad,'192.0.2.1'));
+    same((int)$f->db->query('SELECT COUNT(*) FROM attendance_events')->fetchColumn(),0);
+    $r=$f->domain->quick('quick_initial',$p,'192.0.2.1'); same(count($r['task']['members']),2); same($f->domain->quick('quick_initial',$p,'192.0.2.1'),$r);
+    $changed=$p; $changed['members'][0]['status']='unknown'; rejects(fn()=> $f->domain->quick('quick_initial',$changed,'192.0.2.1'),'IDEMPOTENCY_CONFLICT');
+    $events=Support::all($f->db,'SELECT actor_id,actor_name FROM attendance_events'); same(count($events),2); same($events[0]['actor_id'],null); same($events[0]['actor_name'],'便捷入口（未验证身份）');
+    $audit=json_decode(Support::one($f->db,"SELECT detail_json FROM audit_logs WHERE action='quick_initial'")['detail_json'],true); same($audit['identity_verified'],false); same($audit['claimed_student_no'],'00100001');
+});
+test('quick updates preserve initial facts, reject cross-room members, stale versions and forged task or time fields',function (Fixture $f): void {
+    $f->open(); $identity=['student_no'=>'00100001','room_number'=>'001']; $t=$f->domain->quick('quick_lookup',$identity,'192.0.2.1')['task'];
+    $members=array_map(fn($m)=>['student_id'=>$m['student_id'],'status'=>'away','location'=>'图书馆'],$t['members']);
+    $initial=$f->domain->quick('quick_initial',$identity+['version'=>$t['version'],'roster_version'=>$t['roster_version'],'idempotency_key'=>'quick-initial-01','members'=>$members],'192.0.2.1')['task'];
+    $payload=$identity+['version'=>$initial['version'],'student_ids'=>[$initial['members'][0]['student_id']],'status'=>'present','location'=>'','idempotency_key'=>'quick-update-001'];
+    $forged=$payload; $forged['now']='2099-01-01 23:00:00'; rejects(fn()=> $f->domain->quick('quick_update',$forged,'192.0.2.1'));
+    $other=$f->task($f->b)['members'][0]['student_id']; $cross=$payload; $cross['student_ids'][]=$other; rejects(fn()=> $f->domain->quick('quick_update',$cross,'192.0.2.1'),'FORBIDDEN');
+    $updated=$f->domain->quick('quick_update',$payload,'192.0.2.1')['task']; same($updated['members'][0]['initial_status'],'away'); same($updated['members'][0]['current_status'],'present');
+    $stale=$payload; $stale['idempotency_key']='quick-update-002'; rejects(fn()=> $f->domain->quick('quick_update',$stale,'192.0.2.1'),'VERSION_CONFLICT');
+});
+test('quick entry honors check time, frozen roster version, retirement and overnight date',function (Fixture $f): void {
+    $id=['student_no'=>'00100001','room_number'=>'001']; $t=$f->domain->quick('quick_lookup',$id,'192.0.2.1')['task'];
+    $p=$id+['version'=>$t['version'],'roster_version'=>$t['roster_version'],'idempotency_key'=>'quick-time-00001','members'=>array_map(fn($m)=>['student_id'=>$m['student_id'],'status'=>'present'],$t['members'])];
+    rejects(fn()=> $f->domain->quick('quick_initial',$p,'192.0.2.1'),'TASK_NOT_OPEN');
+    $f->open(); $p['roster_version']=-1; rejects(fn()=> $f->domain->quick('quick_initial',$p,'192.0.2.1'),'ROSTER_CONFLICT');
+    $f->clock->value='2026-10-30 00:10:00'; same($f->domain->quick('quick_lookup',$id,'192.0.2.1')['task']['business_date'],'2026-10-29');
+    Support::exec($f->db,'UPDATE students SET active=0 WHERE student_no=?',[$id['student_no']]); rejects(fn()=> $f->domain->quick('quick_lookup',$id,'192.0.2.1'),'QUICK_NOT_FOUND');
+});
+test('quick lookup limits repeated invalid requests without logging raw IP',function (Fixture $f): void {
+    $bad=['student_no'=>'99999999','room_number'=>'999'];
+    for ($i=0;$i<60;$i++) rejects(fn()=> $f->domain->quick('quick_lookup',$bad,'192.0.2.199'),'QUICK_NOT_FOUND');
+    rejects(fn()=> $f->domain->quick('quick_lookup',$bad,'192.0.2.199'),'RATE_LIMITED');
+    check(!str_contains(Support::json(Support::all($f->db,'SELECT * FROM rate_limits')),'192.0.2.199'),'raw client IP stored');
+});
+test('quick before 08:00 never creates a missing previous-night task',function (Fixture $f): void {
+    $f->clock->value='2026-10-30 07:59:59'; $f->db->exec('DELETE FROM night_tasks');
+    rejects(fn()=> $f->domain->quick('quick_lookup',['student_no'=>'00100001','room_number'=>'001'],'192.0.2.1'),'QUICK_NOT_FOUND');
+    same((int)$f->db->query('SELECT COUNT(*) FROM night_tasks')->fetchColumn(),0);
+});
+
+test('quick entry freezes an existing previous-night task if scheduling was missed',function (Fixture $f): void {
+    $task=Support::one($f->db,'SELECT frozen_at FROM night_tasks WHERE business_date=?',['2026-10-29']); same($task['frozen_at'],null);
+    $f->clock->value='2026-10-30 00:10:00';
+    $task=$f->domain->quick('quick_lookup',['student_no'=>'00100001','room_number'=>'001'],'192.0.2.1')['task'];
+    same($task['business_date'],'2026-10-29'); same($task['phase'],'open'); same(count($task['members']),2);
+    check(Support::one($f->db,'SELECT frozen_at FROM night_tasks WHERE business_date=?',['2026-10-29'])['frozen_at']!==null,'existing overnight task was not frozen');
+});
+
+test('next day prepares the existing roster without a scheduled tick or another import',function (Fixture $f): void {
+    $f->open(); $before=$f->task(); $f->submit();
+    $f->clock->value='2026-10-30 21:00:00';
+    same(count($f->call('tasks',['date'=>'2026-10-30'],$f->a)['tasks']),0);
+    same($f->call('prepare_today',[],$f->a)['business_date'],'2026-10-30');
+    $today=$f->task($f->a,'2026-10-30'); same(count($today['members']),2); same($today['phase'],'draft');
+    same(array_column($today['members'],'student_no'),array_column($before['members'],'student_no'));
+    same(count($f->call('roster')['students']),4);
+    $f->clock->value='2026-10-30 22:31:00'; $f->call('prepare_today',[],$f->a);
+    $today=$f->task($f->a,'2026-10-30'); same($today['phase'],'open'); check($today['frozen_at']!==null,'new night not frozen');
+    $f->call('report_initial',$f->payload($today),$f->a);
+    same($f->task($f->a,'2026-10-29')['members'][0]['initial_status'],'present');
+    same((int)$f->db->query('SELECT COUNT(*) FROM daily_reports')->fetchColumn(),0,'browser must not replace the scheduled report');
+});
+test('preparing today cannot forge dates and preserves pauses, history and authorized access',function (Fixture $f): void {
+    rejects(fn()=> $f->call('prepare_today',['date'=>'2026-11-05'],$f->a));
+    same((int)$f->db->query('SELECT COUNT(*) FROM night_tasks')->fetchColumn(),1);
+    $f->call('settings_save',['settings'=>['paused_dates'=>['2026-10-30']]]);
+    $f->clock->value='2026-10-30 23:00:00'; $f->call('prepare_today',[],$f->a);
+    $t=$f->task($f->a,'2026-10-30'); same($t['phase'],'paused'); same($t['frozen_at'],null);
+    rejects(fn()=> $f->call('report_initial',$f->payload($t),$f->a),'TASK_NOT_OPEN');
+    same(count($f->call('tasks',['date'=>'2026-10-30'],$f->b)['tasks'][0]['members']),2);
+});
+test('filing configuration is empty by default, public-only, validated and admin controlled',function (Fixture $f): void {
+    same(Domain::publicSettings($f->db),['filing_icp'=>'','filing_police'=>'']);
+    $values=['filing_icp'=>'测试ICP备00000000号-1','filing_police'=>'测试公网安备00000000000000号'];
+    rejects(fn()=> $f->call('settings_save',['settings'=>$values],$f->committee),'FORBIDDEN');
+    $expired=$f->admin; $expired['reauth_until']=time()-1; rejects(fn()=> $f->call('settings_save',['settings'=>$values],$expired),'REAUTH_REQUIRED');
+    rejects(fn()=> $f->call('settings_save',['settings'=>['filing_icp'=>'not saved','filing_police'=>'javascript:alert(1)']]));
+    same(Domain::publicSettings($f->db),['filing_icp'=>'','filing_police'=>'']);
+    $nightBefore=Support::one($f->db,'SELECT check_at,due_at,phase,updated_at FROM night_tasks WHERE business_date=?',['2026-10-29']);
+    $f->clock->value='2026-10-29 22:01:00';
+    $f->call('settings_save',['settings'=>$values]); same(Domain::publicSettings($f->db),$values);
+    same(Support::one($f->db,'SELECT check_at,due_at,phase,updated_at FROM night_tasks WHERE business_date=?',['2026-10-29']),$nightBefore,'filing changes must not rewrite unfinished task');
+    same($f->call('settings')['settings']['filing_police'],$values['filing_police']);
+    $f->call('settings_save',['settings'=>['filing_icp'=>'','filing_police'=>'']]);
+    same(Domain::publicSettings($f->db),['filing_icp'=>'','filing_police'=>'']);
+});
+
+test('business date changes at 08:00 for quick entry and authenticated default views',function (Fixture $f): void {
+    $f->open(); $f->submit(); $id=['student_no'=>'00100001','room_number'=>'001'];
+    foreach (['2026-10-30 00:00:00','2026-10-30 07:59:59'] as $time) {
+        $f->clock->value=$time;
+        same($f->call('prepare_today',[],$f->a)['business_date'],'2026-10-29');
+        same($f->call('tasks',[],$f->admin)['business_date'],'2026-10-29');
+        same($f->call('dashboard')['business_date'],'2026-10-29');
+        same($f->call('reports')['business_date'],'2026-10-29');
+        same($f->domain->quick('quick_lookup',$id,'192.0.2.20')['task']['business_date'],'2026-10-29');
+        same((int)$f->db->query("SELECT COUNT(*) FROM night_tasks WHERE business_date='2026-10-30'")->fetchColumn(),0);
+    }
+    $f->clock->value='2026-10-30 08:00:00';
+    same($f->call('prepare_today',[],$f->a)['business_date'],'2026-10-30');
+    same($f->call('tasks',[],$f->admin)['business_date'],'2026-10-30');
+    same($f->call('dashboard')['business_date'],'2026-10-30');
+    same($f->call('reports')['business_date'],'2026-10-30');
+    same($f->domain->quick('quick_lookup',$id,'192.0.2.20')['task']['business_date'],'2026-10-30');
+    same($f->call('dashboard',['date'=>'2026-10-29'])['metrics']['present'],2);
+});
+test('morning lookup honors daytime check time without requiring yesterday',function (Fixture $f): void {
+    $f->call('settings_save',['settings'=>['reminder_time'=>'10:40','check_time'=>'10:42','due_time'=>'10:47']]);
+    $f->clock->value='2026-10-30 10:43:00';
+    $t=$f->domain->quick('quick_lookup',['student_no'=>'00100001','room_number'=>'001'],'192.0.2.21')['task'];
+    same($t['business_date'],'2026-10-30'); same($t['phase'],'open'); same(count($t['members']),2);
+    same($f->call('dashboard')['business_date'],'2026-10-30');
+});
+test('default preparation before eight never invents a missing historical night',function (Fixture $f): void {
+    $f->clock->value='2026-10-29 07:59:59';
+    same($f->call('prepare_today',[],$f->admin)['business_date'],'2026-10-28');
+    same((int)$f->db->query("SELECT COUNT(*) FROM night_tasks WHERE business_date='2026-10-28'")->fetchColumn(),0);
+    same($f->call('tasks',[],$f->admin)['tasks'],[]);
+    rejects(fn()=> $f->domain->quick('quick_lookup',['student_no'=>'00100001','room_number'=>'001'],'192.0.2.22'),'QUICK_NOT_FOUND');
+});
+test('date filters return only that day even when older tasks remain open',function (Fixture $f): void {
+    $f->open(); $f->clock->value='2026-10-30 21:00:00'; $f->call('prepare_today',[],$f->admin);
+    foreach (['2026-10-29','2026-10-30'] as $date) {
+        $result=$f->call('tasks',['date'=>$date],$f->admin); same(count($result['tasks']),2); same($result['open_tasks'],[]);
+        foreach ($result['tasks'] as $task) same($task['business_date'],$date);
+        foreach ($f->call('dashboard',['date'=>$date])['tasks'] as $task) same($task['business_date'],$date);
+    }
+    $empty=$f->call('tasks',['date'=>'2026-10-31'],$f->admin); same($empty['tasks'],[]); same($empty['open_tasks'],[]);
+    same(count($f->call('tasks',['date'=>'2026-10-29'],$f->a)['tasks']),1);
+});
+
+test('scheduler still creates each calendar day independently of the 08:00 viewing cutoff',function (Fixture $f): void {
+    $f->open(); $f->clock->value='2026-10-30 00:20:00'; $f->domain->tick();
+    check(Support::one($f->db,'SELECT id FROM night_tasks WHERE business_date=?',['2026-10-30'])!==null,'tick did not prepare the new calendar day');
+    same($f->call('dashboard')['business_date'],'2026-10-29');
+    $f->clock->value='2026-10-30 08:00:00'; same($f->call('dashboard')['business_date'],'2026-10-30');
+});
+
+test('business date handles year and leap-day boundaries without backfilling',function (Fixture $f): void {
+    foreach ([['2027-01-01 00:00:00','2026-12-31'],['2028-03-01 07:59:59','2028-02-29'],['2028-03-01 08:00:00','2028-03-01']] as [$now,$expected]) {
+        $f->clock->value=$now; same($f->call('tasks',[],$f->admin)['business_date'],$expected);
+    }
+    same((int)$f->db->query('SELECT COUNT(*) FROM night_tasks')->fetchColumn(),1);
+});
+
+test('followups, inspections and snapshots use the same default date and explicit history stays separate',function (Fixture $f): void {
+    $f->open(); $old=$f->task(); $student=$old['members'][0]['student_id'];
+    $f->call('followup_save',['task_id'=>$old['id'],'student_id'=>$student,'state'=>'contacted','note'=>'第一天跟进']);
+    $f->call('inspection_save',['task_id'=>$old['id'],'result'=>'核实','note'=>'第一天抽查']);
+    $f->clock->value='2026-10-30 07:59:59';
+    same($f->call('followups')['items'][0]['note'],'第一天跟进');
+    same($f->call('inspections')['items'][0]['note'],'第一天抽查');
+    same($f->call('report_snapshot',[])['business_date'],'2026-10-29');
+    $f->clock->value='2026-10-30 22:30:00'; $f->call('prepare_today',[],$f->admin); $new=$f->task($f->a,'2026-10-30');
+    $f->call('followup_save',['task_id'=>$new['id'],'student_id'=>$student,'state'=>'waiting','note'=>'第二天跟进']);
+    $f->call('inspection_save',['task_id'=>$new['id'],'result'=>'核实','note'=>'第二天抽查']);
+    same($f->call('followups')['items'][0]['note'],'第二天跟进');
+    same($f->call('inspections')['items'][0]['note'],'第二天抽查');
+    same($f->call('followups',['date'=>'2026-10-29'])['items'][0]['note'],'第一天跟进');
+    same($f->call('inspections',['date'=>'2026-10-29'])['items'][0]['note'],'第一天抽查');
+    same($f->call('report_snapshot',['date'=>'2026-10-29'])['business_date'],'2026-10-29');
+});
+
 if (defined('PASSWORD_ARGON2ID') && in_array('argon2id',password_algos(),true)) {
     test('real Argon2id login requires TOTP only for the designated account and grants other managers password-based recent verification',function (Fixture $f): void {
         $auth=new Auth($f->db,$f->config); $password='A private policy test passphrase!'; $secret=Security::base32(random_bytes(20));

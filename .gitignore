@@ -1,4 +1,10 @@
 /config/local.php
+/config/db-password.php
+/*.tar
+/*.tar.*
+/*.tgz
+/*.zip
+/*.7z
 /storage/*
 !/storage/.gitkeep
 *.sqlite*

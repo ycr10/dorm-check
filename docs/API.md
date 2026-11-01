@@ -12,7 +12,7 @@
 - `X-Passive-Request: 1` 用于业务轮询，不延长闲置会话。401 清除客户端私有状态；403 只处理权限／验证提示，不一律退出。
 - 时间采用北京时间 `YYYY-MM-DD HH:mm:ss`，日期 `YYYY-MM-DD`。人工发生时间与服务端接收时间分开；HTTP 不接受测试时钟。
 
-所有业务接口要求有效账号；当前策略要求绑定但尚未绑定 TOTP 时返回 `MFA_SETUP_REQUIRED`。尚未配置 `totp_student_no` 时沿用 admin／committee 强制规则；配置后仅指定学号强制绑定，其他账号不再启用两步验证。权限以数据库当前状态为准，不采信请求中的 role、actor_id 或负责人快照。
+除下述 `quick_*` 便捷入口及只读的 `public_settings` 外，业务接口要求有效账号；当前策略要求绑定但尚未绑定 TOTP 时返回 `MFA_SETUP_REQUIRED`。尚未配置 `totp_student_no` 时沿用 admin／committee 强制规则；配置后仅指定学号强制绑定，其他账号不再启用两步验证。权限以数据库当前状态为准，不采信请求中的 role、actor_id 或负责人快照。
 
 ## 2. 身份与会话
 
@@ -33,17 +33,31 @@
 
 密码按 Unicode 字符计数为 15–64 字符，使用原生 Argon2id；本轮 WASM 不支持该算法，成功密码认证未验证。恢复码作为 login 的 otp 输入；使用后原验证器及其余恢复码失效，当前策略指定的账号必须重新绑定。用户对象增加 `totp_allowed`，不允许的账号不能调用绑定接口，前端隐藏绑定入口；后端返回 `MFA_NOT_ALLOWED`，不是只隐藏按钮。
 
-## 3. 任务和历史
+## 2.1 公开备案信息
 
-- `tasks` GET：可选 date。返回所选日期 `tasks`，另外返回较早且未结项的当前授权 `open_tasks`，以及 server_time、check_time、reminder_time。
+`public_settings` GET 无需登录、无需 Session，仅返回 `filing_icp` 与 `filing_police` 字符串（默认均为空）。它在维护期间仍可读取；不返回其他设置。管理员经近期身份验证，通过 `settings_save` 设置这两项；填写公安备案号时须符合“省份简称＋公网安备＋数字＋号”的格式。页面只以文本节点显示，并从数字构造固定域名的查询链接；运营者仍需自行核验备案平台信息。设置为空或接口不可用时，不显示相应内容。
+
+## 3. 免登录寝室便捷登记
+
+`quick_lookup`、`quick_initial`、`quick_update` 均为 POST JSON，仍要求同源、CSRF 和维护模式检查，但**不要求用户登录，不证明实际填报人的身份**。三者不会建立登录态、无法用于其他需鉴权的 API。普通真实客户端 IP 的查询和提交各限每 5 分钟 60 次；若共用代理出口，限额也可能被共用。
+
+- 三个动作均传 `student_no` 和 `room_number` 字符串；按当晚冻结寝室负责人、当前有效学生及同寝信息匹配。未匹配或不唯一返回统一错误，不支持指定其他任务 ID、日期、角色或测试时钟。只能返回该寝当晚所需成员姓名、记录状态和版本，不返回全班名单或历史事件。
+- 00:00–07:59:59 使用前一晚，08:00 以后使用当天；前一晚不存在时不会临时伪造历史任务。今天可补建必要任务，提交仍检查开放时间与冻结名册。
+- `quick_initial` 另传 version、roster_version、idempotency_key 及完整 members 数组（字段与 `report_initial` 相同）；`quick_update` 另传 version、student_ids、status、location 和 idempotency_key。仅允许当前寝室人员、仅允许更新当前状态；更正原始记录及旧晚交接仍走登录流程。
+- 不信任客户端声明的身份。事件 actor_id=null、actor_name=“便捷入口（未验证身份）”，审计记录填写的学号与 `identity_verified=false`；知道学号和房号的人可能冒用，限流／CSRF 不解决这一风险。
+- 记住学号和房号的 Cookie 只由 `quick.html` 在用户选择时设置，30 天，SameSite=Strict、HTTPS 时 Secure、路径限定为该页面；不存密码、名单或申报数据，可随时清除。Cookie 为浏览器可读取的普通偏好，不是登录或身份凭据。
+
+## 4. 任务和历史
+
+- `tasks` GET：可选 date。仅返回所选日期、当前授权的 `tasks`；兼容字段 `open_tasks` 恒为空，不再自动混入之前未结项任务。未指定 date 时，00:00–07:59:59 默认前一晚，08:00 起默认当天。返回 server_time、check_time、reminder_time。
 - 每个寝室任务的 `id` 为字符串 `夜任务ID.寝室ID`，如 `1.2`；数字 `task_id` 字段仅表示夜任务本身，**变更请求须使用完整字符串作为 task_id**。
 - 任务带 business_date、check_at、due_at、phase、roster_version、report_version、submitted_at、late、roster_empty、members。
 - `task_history` GET：task_id；返回 task 和完整 events。转入成员可见本人同晚之前的事件，但不因此获得原寝其他人的记录。
 - `dashboard` GET：manager，可选 date；返回汇总、人员、当晚任务、事件和调度运行结果。
 
-GET 不建立任务、不冻结名单、不保存日报。CLI `tick` 负责调度；正式提交会补做必要冻结，并重新检查版本。设备时间不能提前开放任务。
+GET 不建立任务、不冻结名单、不保存日报。已登录用户浏览默认日期的相关页面时，客户端会先 POST `prepare_today`（无参数，服务器决定业务日期）：08:00 起可以补建当天任务；08:00 前若前一晚任务已存在则可补准备和冻结，不存在则不伪造历史。它不保存自动日报，也不回溯补建历史。CLI `tick` 仍按自然日负责持续调度及日报；正式提交会重新检查版本。设备时间不能提前开放任务。
 
-## 4. 初报、补报与更正
+## 5. 初报、补报与更正
 
 三个动作均要求：task_id、`version`（当前 report_version）、12–100 字符的 idempotency_key。键仅允许字母、数字、`.`、`_`、`:`、`-`。同人同动作同键同内容返回原结果；同键不同内容 409。撤权后即使同键重放也拒绝。
 
@@ -90,7 +104,7 @@ GET 不建立任务、不冻结名单、不保存日报。CLI `tick` 负责调�
 
 成功返回 `data.task`。主要 409：TASK_NOT_OPEN、TASK_CLOSED、VERSION_CONFLICT、ROSTER_CONFLICT、IDEMPOTENCY_CONFLICT、ALREADY_SUBMITTED、INITIAL_IMMUTABLE。冲突后读取最新任务、重新人工核实，用新键提交修改后的内容。
 
-## 5. 草稿、范围与结项
+## 6. 草稿、范围与结项
 
 | 动作 | 方法 | 参数与边界 |
 | --- | --- | --- |
@@ -101,7 +115,7 @@ GET 不建立任务、不冻结名单、不保存日报。CLI `tick` 负责调�
 
 调整只改本晚，保留移出成员及历史事件，不修改当前日常住宿；跨寝先移出再加入，不能一人同时纳入两个寝室。空范围自动关闭且不计缺报。旧晚交接须指定完整任务，不能回溯一般授权获得所有历史任务。
 
-## 6. 名册、授权与安排
+## 7. 名册、授权与安排
 
 均要求 manager；账号维护另按第 2 节 admin 限制。
 
@@ -114,7 +128,7 @@ GET 不建立任务、不冻结名单、不保存日报。CLI `tick` 负责调�
 - `exemption_save` POST：student_id、start_date、end_date、source、note、approved=true；approved 不是对 leader 的提权开关。
 - `exemption_revoke` POST：id、reason；开放任务中受影响且仍为 exempt 的人员转 unknown，原始初报及旧日报不变。
 
-## 7. 跟进、日报、设置和审计
+## 8. 跟进、日报、设置和审计
 
 - `followups` / `inspections` GET：manager，date。
 - `followup_save` POST：task_id、student_id、state、note。state=pending/contacted/safe/waiting/closed。safe 不改人员在寝状态。

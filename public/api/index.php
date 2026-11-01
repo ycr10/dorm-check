@@ -30,15 +30,17 @@ function originOf(string $url): ?string
 }
 
 try {
+    $statelessPublic=($_SERVER['REQUEST_METHOD'] ?? 'GET')==='GET' && in_array($_GET['action'] ?? '',['public_settings','public.settings'],true);
     [$config,$db]=require dirname(__DIR__,2).'/src/bootstrap.php';
     $action=$_GET['action'] ?? 'session';
     if (!is_string($action) || !preg_match('/^[a-z][a-z_.]{0,63}$/D',$action)) throw new ApiError('接口不存在','NOT_FOUND',404);
     $action=str_replace('.','_',$action);
-    $reads=['session','tasks','task_history','dashboard','reports','followups','inspections','roster','grants','settings','audit','draft_get'];
+    $reads=['session','public_settings','tasks','task_history','dashboard','reports','followups','inspections','roster','grants','settings','audit','draft_get'];
     $authActions=['session','login','activate','reset_password','logout','logout_all','change_password','totp_setup','totp_confirm','reauth'];
     $userActions=['user_create','user_reset','user_status','users_list'];
-    $domainActions=['tasks','task_history','dashboard','reports','followups','inspections','roster','grants','settings','audit','draft_get','draft_save','report_initial','report_update','report_correct','report_snapshot','export','followup_save','inspection_save','import_preview','import_commit','student_retire','grant_save','grant_revoke','exemption_save','exemption_revoke','settings_save','task_close','task_reopen','task_roster_adjust'];
-    if (!in_array($action,array_merge($authActions,$userActions,$domainActions),true)) throw new ApiError('接口不存在','NOT_FOUND',404);
+    $quickActions=['quick_lookup','quick_initial','quick_update'];
+    $domainActions=['prepare_today','tasks','task_history','dashboard','reports','followups','inspections','roster','grants','settings','audit','draft_get','draft_save','report_initial','report_update','report_correct','report_snapshot','export','followup_save','inspection_save','import_preview','import_commit','student_retire','grant_save','grant_revoke','exemption_save','exemption_revoke','settings_save','task_close','task_reopen','task_roster_adjust'];
+    if (!in_array($action,array_merge(['public_settings'],$authActions,$userActions,$domainActions,$quickActions),true)) throw new ApiError('接口不存在','NOT_FOUND',404);
     $method=$_SERVER['REQUEST_METHOD'] ?? 'GET';
     $expected=in_array($action,$reads,true)?'GET':'POST';
     if ($method!==$expected) { header('Allow: '.$expected); throw new ApiError('请求方法不正确','METHOD_NOT_ALLOWED',405); }
@@ -60,6 +62,8 @@ try {
         $data=$_GET; unset($data['action']);
         foreach ($data as $value) if (!is_string($value)) throw new ApiError('查询参数格式不正确','INVALID_QUERY',400);
     }
+    // Public filing information remains available while business operations are paused.
+    if ($action==='public_settings') respond(['ok'=>true,'data'=>Domain::publicSettings($db)]);
     $maintenance=$config['storage_path'].'/maintenance.json';
     if (is_file($maintenance)) {
         $state=json_decode((string)file_get_contents($maintenance),true);
@@ -68,6 +72,8 @@ try {
     $auth=new Auth($db,$config);
     if (in_array($action,$authActions,true)) {
         $result=$auth->handle($action,$data);
+    } elseif (in_array($action,$quickActions,true)) {
+        $result=(new Domain($db,$config))->quick($action,$data,(string)($_SERVER['REMOTE_ADDR'] ?? 'unknown'));
     } elseif (in_array($action,$userActions,true)) {
         $user=$auth->requireUser(true);
         $result=$auth->manage($action==='users_list'?'users.list':$action,$user,$data);

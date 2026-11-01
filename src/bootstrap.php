@@ -23,7 +23,7 @@ if (PHP_SAPI !== 'cli' && $config['env'] === 'production') {
     if ((string)ini_get('session.upload_progress.enabled') !== '0' && ini_get('session.upload_progress.enabled') !== '') throw new ApiError('请在 php.ini 或 FPM 池关闭上传进度并重启工作进程', 'UNSAFE_CONFIGURATION', 503);
     if (empty($_SERVER['HTTPS']) || $_SERVER['HTTPS'] === 'off') throw new ApiError('正式环境必须通过 HTTPS 访问', 'HTTPS_REQUIRED', 503);
 }
-if (PHP_SAPI !== 'cli') {
+if (PHP_SAPI !== 'cli' && empty($statelessPublic)) {
     $sessions = $config['storage_path'] . '/sessions'; if (!is_dir($sessions)) mkdir($sessions, 0700, true);
     session_save_path($sessions);
     ini_set('session.use_strict_mode', '1'); ini_set('session.use_only_cookies', '1');

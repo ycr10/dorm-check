@@ -78,7 +78,7 @@ declare(strict_types=1);
 
 $config = require __DIR__ . '/example.php';
 $config['env'] = 'production';
-$config['app_url'] = 'https://hfut.ycr10.cn';
+$config['app_url'] = 'https://dorm.example.com'; // 替换为实际站点地址
 $config['class_name'] = '替换成你的班级名称';
 $config['db_dsn'] = 'mysql:host=127.0.0.1;port=3306;dbname=替换成实际数据库名;charset=utf8mb4';
 $config['db_user'] = '替换成实际数据库账号';

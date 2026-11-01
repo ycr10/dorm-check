@@ -46,6 +46,25 @@ await test('failed login and activation do not disclose an account or stack trac
 await test('private directories, arbitrary PHP and traversal paths are not served', async () => {
   for (const route of ['/config/example.php','/src/Core.php','/storage/test.sqlite','/bin/console.php','/tests/run.php','/router.php','/.gitignore','/assets/../../config/example.php','/%2e%2e/config/example.php']) { const response = await fetch(base + route); assert.equal(response.status, 404, route); }
 });
+await test('quick entry remains a same-origin CSRF-protected POST and cannot unlock private APIs', async () => {
+  const page = await fetch(`${base}/quick.html`); assert.equal(page.status, 200); const html = await page.text(); assert.match(html, /filing\.js/); assert.match(html, /filing-footer/);
+  const icon = await fetch(`${base}/assets/police-filing.png`); assert.equal(icon.status, 200); assert.match(icon.headers.get('content-type'), /image\/png/);
+  const wrong = await request('quick_lookup'); assert.equal(wrong.response.status, 405);
+  const cross = await request('quick_lookup', { method: 'POST', origin: 'https://other.invalid', body: { student_no: '00000000', room_number: '000' } }); assert.equal(cross.data.error.code, 'ORIGIN_INVALID');
+  const noToken = await request('quick_lookup', { method: 'POST', token: '', body: { student_no: '00000000', room_number: '000' } }); assert.equal(noToken.data.error.code, 'CSRF_INVALID');
+  const missing = await request('quick_lookup', { method: 'POST', body: { student_no: '00000000', room_number: '000' } }); assert.equal(missing.response.status, 404); assert.equal(missing.data.error.code, 'QUICK_NOT_FOUND');
+  assert.equal((await request('roster')).response.status, 401);
+});
+await test('filing settings are public, stateless and contain no private settings', async () => {
+  const r = await fetch(`${base}/api/index.php?action=public_settings`); assert.equal(r.status, 200);
+  assert.equal(r.headers.getSetCookie().length, 0); const data = await r.json();
+  assert.deepEqual(Object.keys(data.data).sort(), ['filing_icp', 'filing_police']);
+  for (const value of Object.values(data.data)) assert.equal(typeof value, 'string');
+  const alias = await fetch(`${base}/api/index.php?action=public.settings`); assert.equal(alias.status, 200); assert.equal(alias.headers.getSetCookie().length, 0); assert.deepEqual((await alias.json()).data, data.data);
+  const mutate = await request('public_settings', { method: 'POST', body: {} }); assert.equal(mutate.response.status, 405);
+  const anonymous = await request('prepare_today', { method: 'POST', body: {} }); assert.equal(anonymous.response.status, 401);
+  const get = await request('prepare_today'); assert.equal(get.response.status, 405);
+});
 await test('invalid query arrays and unknown action names are controlled', async () => {
   const r = await fetch(`${base}/api/index.php?action[]=session`); assert.equal(r.status, 404);
   const s = await request('unknown_action'); assert.equal(s.response.status, 404);

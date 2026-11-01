@@ -13,6 +13,15 @@ final class Domain
 
     private function now(): string { return Support::now($this->config); }
 
+    private function businessDate(?string $now = null): string
+    {
+        $now = $now ?? $this->now();
+        $today = substr($now,0,10);
+        return substr($now,11,8) < '08:00:00'
+            ? (new \DateTimeImmutable($today,new \DateTimeZone('Asia/Shanghai')))->modify('-1 day')->format('Y-m-d')
+            : $today;
+    }
+
     public function install(): void
     {
         Schema::install($this->db);
@@ -52,6 +61,7 @@ final class Domain
                 'exemption_revoke' => $this->exemptionRevoke($u, $data),
                 'settings' => $this->getSettings($u),
                 'settings_save' => $this->saveSettings($u, $data),
+                'prepare_today' => $this->prepareToday($data),
                 'audit' => $this->audit($u, $data),
                 'task_close','task_reopen' => $this->closeTask($action, $u, $data),
                 'task_roster_adjust' => $this->adjustRoster($u, $data),
@@ -148,12 +158,11 @@ final class Domain
 
     private function listTasks(array $u, array $data): array
     {
-        $date = $this->date($data['date'] ?? substr($this->now(),0,10)); $tasks = []; $old = [];
-        foreach (Support::all($this->db, "SELECT r.*,n.business_date,n.check_at,n.due_at,n.frozen_at,n.`delayed` FROM room_tasks r JOIN night_tasks n ON n.id=r.task_id WHERE n.business_date=? OR (n.business_date<? AND r.phase NOT IN ('closed','paused')) ORDER BY n.business_date DESC,r.building,r.room_number", [$date,$date]) as $t) {
-            if (!$this->authorized($u,$t)) continue;
-            if ($t['business_date'] === $date) $tasks[] = $this->roomPayload($t); else $old[] = $this->roomPayload($t);
+        $date = $this->date($data['date'] ?? $this->businessDate()); $tasks = [];
+        foreach (Support::all($this->db, 'SELECT r.*,n.business_date,n.check_at,n.due_at,n.frozen_at,n.`delayed` FROM room_tasks r JOIN night_tasks n ON n.id=r.task_id WHERE n.business_date=? ORDER BY r.building,r.room_number', [$date]) as $t) {
+            if ($this->authorized($u,$t)) $tasks[] = $this->roomPayload($t);
         }
-        return ['tasks'=>$tasks,'open_tasks'=>$old,'server_time'=>$this->now(),'business_date'=>$date,'check_time'=>Schema::get($this->db,'check_time','22:30'),'reminder_time'=>Schema::get($this->db,'reminder_time','22:25')];
+        return ['tasks'=>$tasks,'open_tasks'=>[],'server_time'=>$this->now(),'business_date'=>$date,'check_time'=>Schema::get($this->db,'check_time','22:30'),'reminder_time'=>Schema::get($this->db,'reminder_time','22:25')];
     }
 
     private function history(array $u, array $data): array
@@ -169,7 +178,7 @@ final class Domain
 
     private function dashboard(array $u, array $data): array
     {
-        $this->manager($u); $date = $this->date($data['date'] ?? substr($this->now(),0,10));
+        $this->manager($u); $date = $this->date($data['date'] ?? $this->businessDate());
         $report = Reports::build($this->db,$date,$this->now());
         return $report + ['tasks'=>$this->listTasks($u,['date'=>$date])['tasks'],'recent_events'=>array_slice(array_reverse($report['events']),0,30),'server_time'=>$this->now(),'job_runs'=>Support::all($this->db,'SELECT * FROM job_runs ORDER BY id DESC LIMIT 10')];
     }
@@ -183,7 +192,21 @@ final class Domain
     {
         $out = [];
         foreach (['class_name','check_time','due_time','reminder_time','paused_dates','retention_days','totp_student_no'] as $key) $out[$key] = Schema::get($this->db,$key);
-        return $out;
+        return $out + self::publicSettings($this->db);
+    }
+
+    public static function publicSettings(PDO $db): array
+    {
+        return ['filing_icp'=>(string)Schema::get($db,'filing_icp',''), 'filing_police'=>(string)Schema::get($db,'filing_police','')];
+    }
+
+    private function prepareToday(array $data): array
+    {
+        if ($data !== []) throw new ApiError('不能指定查寝日期或其他参数');
+        $now=$this->now(); $date=$this->businessDate($now);
+        // Never invent an absent previous-night task when browsing after midnight.
+        if ($date===substr($now,0,10) || Support::one($this->db,'SELECT id FROM night_tasks WHERE business_date=?',[$date])) $this->prepare($date);
+        return ['business_date'=>$date,'server_time'=>$this->now()];
     }
 
     public function prepare(string $date): void
@@ -291,6 +314,69 @@ final class Domain
         Support::exec($this->db,'INSERT INTO request_keys (actor_id,action,token,request_hash,result_json,created_at) VALUES (?,?,?,?,?,?)',[$u['id'],$action,$key,$hash,Support::json($result),$this->now()]);
         Audit::write($this->db,$u['id'],$action,['task_id'=>$data['task_id'],'version'=>$t['report_version']+1]);
         return $result;
+    }
+
+    private function quickLimit(string $client, string $kind): void
+    {
+        $ip=substr($client,0,128);
+        $bucket=hash_hmac('sha256','quick:'.$kind.':'.$ip,base64_decode($this->config['app_key'],true) ?: '');
+        $allowed=Schema::transaction($this->db,function () use ($bucket): bool {
+            $now=time(); $row=Support::one($this->db,'SELECT window_start,attempts FROM rate_limits WHERE bucket=?',[$bucket]);
+            if (!$row) { Support::exec($this->db,'INSERT INTO rate_limits (bucket,window_start,attempts,blocked_until) VALUES (?,?,1,0)',[$bucket,$now]); return true; }
+            if ($now-(int)$row['window_start']>=300) { Support::exec($this->db,'UPDATE rate_limits SET window_start=?,attempts=1,blocked_until=0 WHERE bucket=?',[$now,$bucket]); return true; }
+            $count=(int)$row['attempts']+1; Support::exec($this->db,'UPDATE rate_limits SET attempts=? WHERE bucket=?',[$count,$bucket]);
+            return $count<=60;
+        });
+        if (!$allowed) throw new ApiError('操作过于频繁，请五分钟后重试','RATE_LIMITED',429);
+    }
+
+    private function quickTask(array $data): array
+    {
+        $no=Support::text($data['student_no'] ?? '',64); $room=Support::text($data['room_number'] ?? '',100);
+        if (!preg_match('/^[A-Za-z0-9_-]{3,64}$/D',$no) || $room==='') throw new ApiError('请填写寝室长学号和寝室号');
+        $now=$this->now(); $today=substr($now,0,10); $date=$this->businessDate($now);
+        if ($date!==$today && !Support::one($this->db,'SELECT id FROM night_tasks WHERE business_date=?',[$date])) throw new ApiError('未找到唯一的当晚寝室任务，请核对信息或联系班委','QUICK_NOT_FOUND',404);
+        $this->prepare($date);
+        $matches=Support::all($this->db,'SELECT r.*,n.business_date,n.check_at,n.due_at,n.frozen_at FROM room_tasks r JOIN night_tasks n ON n.id=r.task_id JOIN students s ON s.student_no=r.leader_no AND s.room_id=r.room_id AND s.active=1 WHERE n.business_date=? AND r.room_number=? AND r.leader_no=? AND s.leader_no=r.leader_no',[$date,$room,$no]);
+        $matches=array_values(array_filter($matches,fn($t)=>$t['room_number']===$room && $t['leader_no']===$no));
+        if (count($matches)!==1) throw new ApiError('未找到唯一的当晚寝室任务，请核对信息或联系班委','QUICK_NOT_FOUND',404);
+        return $matches[0];
+    }
+
+    private function quickPayload(array $t): array
+    {
+        $members=Support::all($this->db,'SELECT student_id,name,initial_status,initial_location,corrected_initial_status,current_status FROM night_members WHERE task_id=? AND room_id=? AND included=1 ORDER BY student_no',[$t['task_id'],$t['room_id']]);
+        foreach ($members as &$m) { $m['student_id']=(int)$m['student_id']; $m['immutable']=$m['initial_status']!=='unreported' || $m['corrected_initial_status']!==null; }
+        unset($m);
+        return ['business_date'=>$t['business_date'],'room'=>$t['building'].' · '.$t['room_number'],'check_at'=>$t['check_at'],'due_at'=>$t['due_at'],'phase'=>$t['phase'],'submitted_at'=>$t['submitted_at'],'roster_version'=>(int)$t['roster_version'],'version'=>(int)$t['report_version'],'members'=>$members];
+    }
+
+    public function quick(string $action, array $data, string $client): array
+    {
+        if (!in_array($action,['quick_lookup','quick_initial','quick_update'],true)) throw new ApiError('接口不存在','NOT_FOUND',404);
+        $this->quickLimit($client,$action==='quick_lookup'?'lookup':'submit');
+        return Schema::transaction($this->db,function () use ($action,$data): array {
+            $t=$this->quickTask($data);
+            if ($action==='quick_lookup') return ['task'=>$this->quickPayload($t),'server_time'=>$this->now()];
+            $allowed=$action==='quick_initial' ? ['student_no','room_number','version','roster_version','members','idempotency_key'] : ['student_no','room_number','version','student_ids','status','location','idempotency_key'];
+            foreach ($data as $key=>$value) if (!in_array($key,$allowed,true)) throw new ApiError('请求包含不支持的字段');
+            $key=Support::text($data['idempotency_key'] ?? '',100);
+            if (!preg_match('/^[A-Za-z0-9._:\-]{12,100}$/D',$key)) throw new ApiError('提交缺少有效的去重标识');
+            $cacheAction=$action.':'.$t['task_id'].':'.$t['room_id']; $hash=hash('sha256',Support::json($this->canonical($data)));
+            $saved=Support::one($this->db,'SELECT request_hash,result_json FROM request_keys WHERE actor_id=0 AND action=? AND token=?',[$cacheAction,$key]);
+            if ($saved) { if (!hash_equals($saved['request_hash'],$hash)) throw new ApiError('同一提交标识不能用于不同内容','IDEMPOTENCY_CONFLICT',409); return json_decode($saved['result_json'],true,512,JSON_THROW_ON_ERROR); }
+            if ($this->now()<$t['check_at'] || !$t['frozen_at']) throw new ApiError('正式查寝尚未开放','TASK_NOT_OPEN',409);
+            if (in_array($t['phase'],['closed','paused'],true)) throw new ApiError('任务已结项或暂停，请联系班委','TASK_CLOSED',409);
+            if (!isset($data['version']) || (string)$data['version']!==(string)$t['report_version']) throw new ApiError('数据已变化，请重新读取后提交','VERSION_CONFLICT',409);
+            $actor=['id'=>null,'name'=>'便捷入口（未验证身份）'];
+            if ($action==='quick_initial') $this->initial($actor,$t,$data); else $this->update($actor,$t,$data);
+            Support::exec($this->db,'UPDATE room_tasks SET report_version=report_version+1,updated_at=? WHERE task_id=? AND room_id=?',[$this->now(),$t['task_id'],$t['room_id']]);
+            $updated=Support::one($this->db,'SELECT r.*,n.business_date,n.check_at,n.due_at,n.frozen_at FROM room_tasks r JOIN night_tasks n ON n.id=r.task_id WHERE r.task_id=? AND r.room_id=?',[$t['task_id'],$t['room_id']]);
+            $result=['task'=>$this->quickPayload($updated)];
+            Support::exec($this->db,'INSERT INTO request_keys (actor_id,action,token,request_hash,result_json,created_at) VALUES (0,?,?,?,?,?)',[$cacheAction,$key,$hash,Support::json($result),$this->now()]);
+            Audit::write($this->db,null,$action,['task_id'=>$t['task_id'].'.'.$t['room_id'],'claimed_student_no'=>$data['student_no'],'identity_verified'=>false,'version'=>(int)$t['report_version']+1]);
+            return $result;
+        });
     }
 
     private function initial(array $u, array $t, array $data): void
@@ -549,7 +635,7 @@ final class Domain
 
     private function activityList(string $action, array $u, array $data): array
     {
-        $this->manager($u); $date=$this->date($data['date'] ?? substr($this->now(),0,10));
+        $this->manager($u); $date=$this->date($data['date'] ?? $this->businessDate());
         $items=Support::all($this->db,"SELECT a.*,r.building,r.room_number FROM $action a JOIN night_tasks n ON n.id=a.task_id JOIN room_tasks r ON r.task_id=a.task_id AND r.room_id=a.room_id WHERE n.business_date=? ORDER BY a.id",[$date]);
         foreach ($items as &$item) { $item['task_id']=$item['task_id'].'.'.$item['room_id']; $item['room']=$item['building'].' · '.$item['room_number']; }
         unset($item); return ['items'=>$items];
@@ -583,12 +669,17 @@ final class Domain
     {
         $this->manager($u,true); $this->recent($u); $s=$data['settings'] ?? null;
         if (!is_array($s)) throw new ApiError('设置格式不正确');
-        $allowed=['class_name','check_time','due_time','reminder_time','paused_dates','retention_days','totp_student_no'];
+        $allowed=['class_name','check_time','due_time','reminder_time','paused_dates','retention_days','totp_student_no','filing_icp','filing_police'];
         foreach ($s as $key=>$v) {
             if (!in_array($key,$allowed,true)) throw new ApiError('不支持的设置项：'.$key);
             if (in_array($key,['check_time','due_time','reminder_time'],true)) {
                 if (!is_string($v) || !preg_match('/^(?:[01][0-9]|2[0-3]):[0-5][0-9]$/D',$v)) throw new ApiError('时间请使用 HH:mm 格式');
             } elseif ($key==='class_name') { $v=Support::text($v,100); if ($v==='') throw new ApiError('班级不能为空'); }
+            elseif (in_array($key,['filing_icp','filing_police'],true)) {
+                if (!is_string($v)) throw new ApiError('备案号必须为文字');
+                $v=Support::text($v,100);
+                if ($key==='filing_police' && $v!=='' && !preg_match('/^[\p{Han}]{1,10}公网安备[0-9]{8,30}号$/uD',$v)) throw new ApiError('公安备案号请填写完整文字，例如：京公网安备11000000000000号');
+            }
             elseif ($key==='totp_student_no') {
                 if (!is_string($v) || !preg_match('/^[A-Za-z0-9_-]{3,64}$/D',trim($v))) throw new ApiError('请填写一个完整的登录学号，不能留空');
                 $target=Support::one($this->db,'SELECT id,student_no,status FROM users WHERE student_no=?',[trim($v)]);
@@ -620,10 +711,12 @@ final class Domain
             Support::exec($this->db,'UPDATE users SET auth_version=auth_version+1,updated_at=?',[$this->now()]);
             Audit::write($this->db,$u['id'],'settings.totp_account',['before'=>$before['totp_student_no'],'after'=>$after['totp_student_no'],'disabled_user_ids'=>array_column($disabled,'id'),'all_sessions_revoked'=>true]);
         }
-        foreach (Support::all($this->db,'SELECT * FROM night_tasks WHERE frozen_at IS NULL') as $n) {
-            $phase=in_array($n['business_date'],$after['paused_dates'],true)?'paused':'draft';
-            Support::exec($this->db,'UPDATE night_tasks SET check_at=?,due_at=?,phase=?,updated_at=? WHERE id=?',[$n['business_date'].' '.$after['check_time'].':00',$n['business_date'].' '.$after['due_time'].':00',$phase,$this->now(),$n['id']]);
-            Support::exec($this->db,'UPDATE room_tasks SET phase=? WHERE task_id=?',[$phase,$n['id']]);
+        if (array_intersect(['check_time','due_time','paused_dates'],array_keys($s))) {
+            foreach (Support::all($this->db,'SELECT * FROM night_tasks WHERE frozen_at IS NULL') as $n) {
+                $phase=in_array($n['business_date'],$after['paused_dates'],true)?'paused':'draft';
+                Support::exec($this->db,'UPDATE night_tasks SET check_at=?,due_at=?,phase=?,updated_at=? WHERE id=?',[$n['business_date'].' '.$after['check_time'].':00',$n['business_date'].' '.$after['due_time'].':00',$phase,$this->now(),$n['id']]);
+                Support::exec($this->db,'UPDATE room_tasks SET phase=? WHERE task_id=?',[$phase,$n['id']]);
+            }
         }
         Audit::write($this->db,$u['id'],'settings.save',['before'=>$before,'after'=>$after]);
         return ['settings'=>$after,'relogin_required'=>$totpChanged];
@@ -639,13 +732,13 @@ final class Domain
 
     private function report(array $u, array $data): array
     {
-        $this->manager($u); $date=$this->date($data['date'] ?? substr($this->now(),0,10));
+        $this->manager($u); $date=$this->date($data['date'] ?? $this->businessDate());
         return Reports::load($this->db,$date,$data['version'] ?? 'latest',$this->now());
     }
 
     private function snapshot(array $u, array $data): array
     {
-        $this->manager($u); $date=$this->date($data['date'] ?? substr($this->now(),0,10));
+        $this->manager($u); $date=$this->date($data['date'] ?? $this->businessDate());
         $reason=Support::text($data['reason'] ?? '班委手动保存',500);
         $result=Reports::save($this->db,$date,$this->now(),$reason);
         Audit::write($this->db,$u['id'],'report.snapshot',['date'=>$date,'version'=>$result['version'],'reason'=>$reason]); return $result;

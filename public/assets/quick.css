@@ -1,0 +1,10 @@
+/* The quick form uses the same theme, typography and controls as the main app. */
+.quick-header{display:flex;justify-content:space-between;align-items:center;gap:16px;max-width:980px;margin:auto;padding:24px 28px}
+.quick-brand{color:var(--text);font-size:21px;font-weight:650;letter-spacing:-.5px}.quick-brand small{color:var(--muted);font-size:10px;letter-spacing:1px;margin-left:7px}
+.quick-main{width:min(100% - 32px,720px);margin:32px auto 48px;min-height:calc(100vh - 220px)}
+.quick-main h1{font-size:32px}.quick-main .panel-body{padding-top:20px}.quick-subtitle{color:var(--muted);font-size:14px}
+.quick-meta{display:flex;gap:8px;flex-wrap:wrap;margin:18px 0}.quick-meta span{background:var(--surface-soft);border:1px solid var(--line);padding:5px 10px;border-radius:10px;font-size:12px}
+.quick-member{padding:18px 0;border-top:1px solid var(--line)}.quick-member:first-child{border-top:0}.quick-member-head{display:flex;justify-content:space-between;align-items:center;gap:12px}.quick-member h3{margin:0}.quick-member .field{margin:14px 0 0}.quick-member .button{margin-top:12px}
+.quick-actions{display:flex;flex-wrap:wrap;gap:10px;margin:18px 0}.quick-feedback{margin:12px 0}.quick-inline{display:flex;gap:10px;flex-wrap:wrap;align-items:center}.quick-inline a{font-size:13px}
+.quick-details{margin-top:8px;font-size:13px}.quick-details summary{cursor:pointer;color:var(--blue);padding:6px 0}.quick-details[open]{padding:0 12px 12px;border:1px solid var(--line);border-radius:12px}
+@media(max-width:520px){.quick-header{padding:20px}.quick-main{margin:18px auto 32px}.quick-main h1{font-size:27px}.quick-actions .button{width:100%}}

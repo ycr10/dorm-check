@@ -1,0 +1,39 @@
+{
+  "scope": "Real HTTP and Edge with synthetic isolated data; quick submission is intentionally unauthenticated; admin access uses pre-authenticated synthetic session.",
+  "passed": 8,
+  "failed": 0,
+  "results": [
+    {
+      "name": "filing configuration is editable and displayed on login, admin and quick pages",
+      "ok": true
+    },
+    {
+      "name": "wrong details are rejected and optional cookie is saved without roster or attendance",
+      "ok": true
+    },
+    {
+      "name": "one-click all-present only fills, and late initial distinguishes check time and current status",
+      "ok": true
+    },
+    {
+      "name": "current update preserves initial record and server audit marks the identity unverified",
+      "ok": true
+    },
+    {
+      "name": "remembered identifiers restore on reload and can be explicitly forgotten",
+      "ok": true
+    },
+    {
+      "name": "filing text is rendered safely and empty settings disappear on every page",
+      "ok": true
+    },
+    {
+      "name": "default date follows server rollover while a manually selected history date stays pinned (mocked server date)",
+      "ok": true
+    },
+    {
+      "name": "browser has no unexpected script or CSP errors",
+      "ok": true
+    }
+  ]
+}
