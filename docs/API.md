@@ -1,6 +1,6 @@
-# API 契约（首版）
+# API 契约（年级版）
 
-同域入口：`/api/index.php?action=动作名`。本文描述实际源码接口，不代表生产环境已部署。单实例对应一个班级；无跨班级切换参数。
+同域入口：`/api/index.php?action=动作名`。本文描述实际源码接口，不代表生产环境已部署。单实例管理多个班级；后台以当前账号的班级授权控制数据范围。
 
 ## 1. 请求与响应
 
@@ -26,7 +26,7 @@
 | `reauth` | POST | password；已启用 TOTP 的账号另需新的 otp；更新近期验证窗口 |
 | `change_password` | POST | current_password、password；已启用 TOTP 的账号须近期验证；完成后重新登录 |
 | `logout` / `logout_all` | POST | 注销当前／全部会话 |
-| `user_create` | POST | admin＋近期验证；student_no、name、role |
+| `user_create` | POST | admin＋近期验证；student_no、name、role=admin/committee；不能创建宿舍长角色 |
 | `user_reset` | POST | admin＋近期验证；user_id；返回新重置码 |
 | `user_status` | POST | admin＋近期验证；user_id、status=active/disabled；不能停用自己 |
 | `users_list` | POST | admin＋近期验证；无参数，按当前入口约定不是 GET |
@@ -41,7 +41,7 @@
 
 `quick_lookup`、`quick_initial`、`quick_update` 均为 POST JSON，仍要求同源、CSRF 和维护模式检查，但**不要求用户登录，不证明实际填报人的身份**。三者不会建立登录态、无法用于其他需鉴权的 API。普通真实客户端 IP 的查询和提交各限每 5 分钟 60 次；若共用代理出口，限额也可能被共用。
 
-- 三个动作均传 `student_no` 和 `room_number` 字符串；按当晚冻结寝室负责人、当前有效学生及同寝信息匹配。未匹配或不唯一返回统一错误，不支持指定其他任务 ID、日期、角色或测试时钟。只能返回该寝当晚所需成员姓名、记录状态和版本，不返回全班名单或历史事件。
+- 三个动作均传 `student_no` 和 `room_number` 字符串；按当前有效宿舍负责人及同寝关系匹配当晚物理宿舍。未匹配或不唯一返回统一错误，不支持指定其他任务 ID、日期、角色或测试时钟。跨班混住时返回该寝所有班级成员的姓名、班级、记录状态和版本，不返回其他宿舍或历史事件。
 - 00:00–07:59:59 使用前一晚，08:00 以后使用当天；前一晚不存在时不会临时伪造历史任务。今天可补建必要任务，提交仍检查开放时间与冻结名册。
 - `quick_initial` 另传 version、roster_version、idempotency_key 及完整 members 数组（字段与 `report_initial` 相同）；`quick_update` 另传 version、student_ids、status、location 和 idempotency_key。仅允许当前寝室人员、仅允许更新当前状态；更正原始记录及旧晚交接仍走登录流程。
 - 不信任客户端声明的身份。事件 actor_id=null、actor_name=“便捷入口（未验证身份）”，审计记录填写的学号与 `identity_verified=false`；知道学号和房号的人可能冒用，限流／CSRF 不解决这一风险。
@@ -49,21 +49,21 @@
 
 ## 4. 任务和历史
 
-- `tasks` GET：可选 date。仅返回所选日期、当前授权的 `tasks`；兼容字段 `open_tasks` 恒为空，不再自动混入之前未结项任务。未指定 date 时，00:00–07:59:59 默认前一晚，08:00 起默认当天。返回 server_time、check_time、reminder_time。
+- `tasks` GET：可选 date、class_id。只返回所选日期、当前班级授权范围的 `tasks`；管理员省略 class_id 可看全年级，班委省略时看其全部授权班级。兼容字段 `open_tasks` 恒为空，不再自动混入之前未结项任务。未指定 date 时，00:00–07:59:59 默认前一晚，08:00 起默认当天。返回 server_time、check_time、reminder_time。
 - 每个寝室任务的 `id` 为字符串 `夜任务ID.寝室ID`，如 `1.2`；数字 `task_id` 字段仅表示夜任务本身，**变更请求须使用完整字符串作为 task_id**。
 - 任务带 business_date、check_at、due_at、phase、roster_version、report_version、submitted_at、late、roster_empty、members。
 - `task_history` GET：task_id；返回 task 和完整 events。转入成员可见本人同晚之前的事件，但不因此获得原寝其他人的记录。
-- `dashboard` GET：manager，可选 date；返回汇总、人员、当晚任务、事件和调度运行结果。
+- `dashboard` GET：admin/committee，可选 date、class_id；返回授权范围内重新计算的汇总、人员、当晚任务、事件和调度运行结果。请求不属于授权范围的 class_id 返回 `FORBIDDEN`。
 
 GET 不建立任务、不冻结名单、不保存日报。已登录用户浏览默认日期的相关页面时，客户端会先 POST `prepare_today`（无参数，服务器决定业务日期）：08:00 起可以补建当天任务；08:00 前若前一晚任务已存在则可补准备和冻结，不存在则不伪造历史。它不保存自动日报，也不回溯补建历史。CLI `tick` 仍按自然日负责持续调度及日报；正式提交会重新检查版本。设备时间不能提前开放任务。
 
 ## 5. 初报、补报与更正
 
-三个动作均要求：task_id、`version`（当前 report_version）、12–100 字符的 idempotency_key。键仅允许字母、数字、`.`、`_`、`:`、`-`。同人同动作同键同内容返回原结果；同键不同内容 409。撤权后即使同键重放也拒绝。
+三个动作均要求：task_id、`version`（当前 report_version）、12–100 字符的 idempotency_key。键仅允许字母、数字、`.`、`_`、`:`、`-`。同人同动作同键同内容、授权范围不变时返回原结果；同键不同内容 409。撤权后不允许利用缓存越权，若仍可访问该任务但权限范围已变化，重试返回 409 `SCOPE_CHANGED`，应重新读取当前结果。旧版缓存不自动越权重放。
 
 ### report_initial
 
-另需 roster_version 和完整 members 数组，不能漏人、重复或夹带其他寝室成员：
+另需 roster_version 和当前班级范围内的完整 members 数组，不能漏人、重复或夹带无权成员；管理员未限定班级时需整寝成员。混住宿舍班委初报只影响获授权人员；整寝全部应报成员完成后才标记整寝完成：
 
 ```json
 {
@@ -84,7 +84,7 @@ GET 不建立任务、不冻结名单、不保存日报。已登录用户浏览�
 }
 ```
 
-上例仅示意一人，实际必须发送该任务完整成员数组。每人字段：
+上例仅示意一人，实际必须发送该任务在本次授权范围内的完整成员数组。每人字段：
 
 - status：查寝时点的 present／away／exempt／unknown；不能主动选择 unreported。
 - location：查寝时点去向。away／unknown 时必填，exempt 须有服务端有效核实安排。
@@ -100,9 +100,9 @@ GET 不建立任务、不冻结名单、不保存日报。已登录用户浏览�
 
 ### report_correct
 
-另需 student_id、target=current/initial、status、location、必填 reason。leader 只能更正 current；manager 可更正 initial。更正初报保存 corrected_initial_*，不会覆盖 initial_*；初报后补列且原始为 unreported 的成员，班委补正时同步补齐当前投影。
+另需 student_id、target=current/initial、status、location、必填 reason。admin/committee 在其班级授权范围内可更正 initial。更正初报保存 corrected_initial_*，不会覆盖 initial_*；初报后补列且原始为 unreported 的成员，班委补正时同步补齐当前投影。
 
-成功返回 `data.task`。主要 409：TASK_NOT_OPEN、TASK_CLOSED、VERSION_CONFLICT、ROSTER_CONFLICT、IDEMPOTENCY_CONFLICT、ALREADY_SUBMITTED、INITIAL_IMMUTABLE。冲突后读取最新任务、重新人工核实，用新键提交修改后的内容。
+成功返回 `data.task`。主要 409：TASK_NOT_OPEN、TASK_CLOSED、VERSION_CONFLICT、ROSTER_CONFLICT、IDEMPOTENCY_CONFLICT、SCOPE_CHANGED、ALREADY_SUBMITTED、INITIAL_IMMUTABLE。冲突后读取最新任务、重新人工核实，用新键提交修改后的内容。
 
 ## 6. 草稿、范围与结项
 
@@ -113,30 +113,34 @@ GET 不建立任务、不冻结名单、不保存日报。已登录用户浏览�
 | `task_roster_adjust` | POST | manager；task_id、roster_version、完整 student_ids、reason；仅已冻结且开放任务 |
 | `task_close` / `task_reopen` | POST | manager；task_id、reason；有未解决人员或缺报不能正常结项 |
 
-调整只改本晚，保留移出成员及历史事件，不修改当前日常住宿；跨寝先移出再加入，不能一人同时纳入两个寝室。空范围自动关闭且不计缺报。旧晚交接须指定完整任务，不能回溯一般授权获得所有历史任务。
+调整只改本晚，保留移出成员及历史事件，不修改当前日常住宿；跨寝先移出再加入，不能一人同时纳入两个寝室。空范围自动关闭且不计缺报。结项、重新开放、整寝名册调整和抽查写入必须对该寝全部成员的班级有权限，或由管理员在全年级范围执行。历史日期按当前班级授权查询，历史成员按该晚冻结的班级归属过滤。
 
 ## 7. 名册、授权与安排
 
-均要求 manager；账号维护另按第 2 节 admin 限制。
+均要求 admin/committee；账号和班级管理另要求 admin＋近期验证。所有目标学生、班级、历史记录在服务端重新核对授权。
 
-- `roster` / `grants` GET：返回当前学生、寝室、必要账号、授权和安排。
-- `import_preview` POST：csv；返回 errors、warnings、hash。UTF-8，可 BOM，最大 2 MiB、1,000 条；学号保持字符串。
-- `import_commit` POST：相同 csv、hash、confirm=true。hash 绑定原文、当前操作者及班级；仅新增／更新，不隐式删除未出现者。
+- `classes` GET：列出当前账号可用班级；admin 可见全年级。
+- `class_create` POST：admin＋近期验证，name；`class_rename` POST：admin＋近期验证，class_id、name；保留历史名称映射和冻结快照。
+- `class_permissions_save` POST：admin＋近期验证，user_id、class_ids 数组；设置班委可访问的班级，空数组表示撤销全部。目标账号现有会话版本失效。
+- `room_leader_change` POST：admin＋近期验证，room_id、student_no、reason；新负责人必须是该寝有效成员，更新当前住宿关系，不改冻结历史。
+- `roster` GET：可选 class_id；返回授权范围内当前学生、相关宿舍和安排，账号及班级授权列表仅管理员可见。
+- `import_preview` POST：class_id、csv；返回 errors、warnings、changes、hash 及预览行。UTF-8，可 BOM，最大 2 MiB、1,000 条；学号保持字符串。缺失或不在本寝的负责人会产生警告，核实之前不能通过便捷入口填报。
+- `import_commit` POST：相同 class_id、csv、hash、confirm=true。hash 绑定原文、操作者、目标班级与当前名单状态；仅新增／更新，不隐式删除未出现者。跨班转入须对来源和目标均有权限；共享寝室负责人不一致时拒绝覆盖。
 - `student_retire` POST：student_id、reason；移出后续名册，不删除冻结历史，也不自动停用账号／撤销授权。仍被其他有效学生引用为负责人的，须先交接。
-- `grant_save` POST：近期验证；user_id（leader 账号）、room_id、valid_from，可选 valid_to、task_id（完整任务字符串）。日期值可用于整日授权，时间值用于精确范围。
-- `grant_revoke` POST：近期验证；grant_id。
-- `exemption_save` POST：student_id、start_date、end_date、source、note、approved=true；approved 不是对 leader 的提权开关。
-- `exemption_revoke` POST：id、reason；开放任务中受影响且仍为 exempt 的人员转 unknown，原始初报及旧日报不变。
+- `exemption_save` POST：student_id、start_date、end_date、source、note、approved=true；学生须在当前班级范围内。
+- `exemption_revoke` POST：id、reason；须覆盖受影响的历史班级；开放任务中受影响且仍为 exempt 的人员转 unknown，原始初报及旧日报不变。
+
+不再提供 `grant_save`、`grant_revoke` 或宿舍长账号授权接口。
 
 ## 8. 跟进、日报、设置和审计
 
 - `followups` / `inspections` GET：manager，date。
 - `followup_save` POST：task_id、student_id、state、note。state=pending/contacted/safe/waiting/closed。safe 不改人员在寝状态。
 - `inspection_save` POST：task_id、result、note；记录核实结果，不自动改申报。
-- `reports` GET：manager，date，version=latest 或固定日报记录 id；返回的 version 是该晚显示用版本号，不是查询用 id。
+- `reports` GET：admin/committee，date、可选 class_id，version=latest 或固定日报记录 id；固定快照在返回时按当前班级权限及历史班级归属投影，重新计算人数和汇总，未知归属仅管理员可见。返回的 version 是该晚显示用版本号，不是查询用 id。
 - `report_snapshot` POST：manager，date、reason；保存不可变版本。
 - `export` POST：manager＋近期验证，date、version；**返回 XLSX 二进制而非 JSON**，六表来自同一快照。私有磁盘路径不会返回浏览器，读取完删除临时文件。
-- `settings` GET：manager 可读取规则与运行结果；`settings_save` POST：仅 admin＋近期验证，以 `{"settings":{...}}` 对象提交 class_name、check_time、due_time、reminder_time、paused_dates、retention_days、totp_student_no。冻结任务时间不被新配置改写；retention_days 不触发自动删除。修改两步验证账号另须下面的显式确认参数。
+- `settings` GET：仅 admin 可读取规则与运行结果；`settings_save` POST：仅 admin＋近期验证，以 `{"settings":{...}}` 对象提交 grade_name、check_time、due_time、reminder_time、paused_dates、retention_days、totp_student_no。冻结任务时间不被新配置改写；retention_days 不触发自动删除。修改两步验证账号另须下面的显式确认参数。
 - `audit` GET：仅 admin，page（从 1 开始，每页 50 条）；返回 items、page，含对象详情但不含凭据原文。
 
 ### 指定唯一两步验证账号
@@ -155,7 +159,7 @@ GET 不建立任务、不冻结名单、不保存日报。已登录用户浏览�
 
 后续更改时 `totp_previous_student_no` 必须与当前设置严格一致，否则 409 `MFA_POLICY_CONFLICT`；缺少布尔 true 的确认参数则 409 `MFA_POLICY_CONFIRM_REQUIRED`。只保存其他设置不需要这些字段。
 
-策略变更在同一写事务中保留目标的绑定和恢复码，清除其他账号的 TOTP 密钥／绑定／恢复码，并增加所有账号的 `auth_version`，使全部旧会话失效。成功响应 `relogin_required=true`，前端重新读取 session 并回到登录页。相同目标再次保存或仅保存日常规则返回 false，不重复清理。角色、寝室授权、密码均不改变。
+策略变更在同一写事务中保留目标的绑定和恢复码，清除其他账号的 TOTP 密钥／绑定／恢复码，并增加所有账号的 `auth_version`，使全部旧会话失效。成功响应 `relogin_required=true`，前端重新读取 session 并回到登录页。相同目标再次保存或仅保存日常规则返回 false，不重复清理。角色、班级授权、密码均不改变。
 
 绑定确认和恢复码使用与策略写入使用相同的串行化写锁，重新检查当前策略／账号版本，不能用旧的待绑定 Session 在策略变更后重新启用其他账号。
 

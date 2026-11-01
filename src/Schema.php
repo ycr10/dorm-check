@@ -35,7 +35,7 @@ final class Schema
         if (!Support::one($db, 'SELECT id FROM app_lock WHERE id=1')) {
             Support::exec($db, 'INSERT INTO app_lock (id,revision) VALUES (1,0)');
         }
-        self::set($db, 'schema_version', 1);
+        if (self::get($db, 'schema_version') === null) self::set($db, 'schema_version', 1);
     }
 
     public static function get(PDO $db, string $key, mixed $default = null): mixed

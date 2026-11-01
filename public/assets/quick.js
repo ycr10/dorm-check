@@ -69,7 +69,7 @@
     const remember = el('input', { type: 'checkbox', checked: !!saved });
     const result = el('div', { class: 'quick-feedback' });
     const submit = el('button', { type: 'submit', class: 'button full' }, '进入当晚登记');
-    const form = el('form', {}, field('寝室长学号', no), field('寝室号', room, '只填写房间号；不要添加楼栋。若多个楼栋无法区分，请联系班委。'), el('label', { class: 'checkbox' }, remember, '在这台设备的浏览器记住学号和寝室号（30 天）'), el('p', { class: 'inline-hint', text: '仅保存在本机 Cookie，非身份验证，不保存名单和申报内容；共用设备请勿勾选。' }), el('div', { class: 'quick-inline' }, button('清除已记住的信息', () => { writeCookie(null); no.value = ''; room.value = ''; remember.checked = false; feedback(result, '已清除本机记住的信息。'); }, 'soft small')), result, submit);
+    const form = el('form', { class: 'quick-entry-form' }, el('div', { class: 'quick-entry-fields' }, field('寝室长学号', no), field('寝室号', room, '只填写房间号；不要添加楼栋。若多个楼栋无法区分，请联系班委。')), el('label', { class: 'checkbox' }, remember, '在这台设备的浏览器记住学号和寝室号（30 天）'), el('p', { class: 'inline-hint', text: '仅保存在本机 Cookie，非身份验证，不保存名单和申报内容；共用设备请勿勾选。' }), el('div', { class: 'quick-inline' }, button('清除已记住的信息', () => { writeCookie(null); no.value = ''; room.value = ''; remember.checked = false; feedback(result, '已清除本机记住的信息。'); }, 'soft small')), result, submit);
     form.addEventListener('submit', async event => {
       event.preventDefault(); if (!form.reportValidity()) return;
       const identity = { student_no: no.value.trim(), room_number: room.value.trim() };
@@ -80,12 +80,12 @@
         catch (error) { feedback(result, error.message, true); }
       });
     });
-    root.replaceChildren(el('div', { class: 'page-kicker', text: 'QUICK CHECK-IN' }), el('h1', { text: '寝室便捷登记' }), el('p', { class: 'quick-subtitle', text: '输入寝室长学号和寝室号，登记当晚情况。' }), el('div', { class: 'notice warning', text: '无需登录：学号与寝室号不能证明填报人身份，请仅由负责人如实登记。不要在公共设备保存信息。' }), panel('进入登记', '凌晨 00:00—07:59 显示上一晚；08:00 起显示当天。', form));
+    root.replaceChildren(el('div', { class: 'quick-heading' }, el('span', { class: 'quick-heading-mark', 'aria-hidden': 'true', text: '归' }), el('div', {}, el('h1', { text: '寝室便捷登记' }), el('p', { class: 'quick-subtitle', text: '核对信息后，登记当晚寝室情况。' }))), el('div', { class: 'notice warning', text: '无需登录：学号与寝室号不能证明填报人身份，请仅由负责人如实登记。不要在公共设备保存信息。' }), panel('进入登记', '凌晨 00:00—07:59 显示上一晚；08:00 起显示当天。', form));
     if (message) feedback(result, message);
   }
   function renderTask(message = '') {
     const task = state.task; const info = el('div', { class: 'quick-feedback' });
-    const header = el('div', {}, el('div', { class: 'page-kicker', text: 'TONIGHT’S CHECK-IN' }), el('h1', { text: task.room }), el('p', { class: 'quick-subtitle', text: `${task.business_date} 晚 · 查寝 ${task.check_at.slice(11,16)} · 截止 ${task.due_at.slice(11,16)}` }), el('div', { class: 'quick-meta' }, el('span', { text: `成员 ${task.members.length} 人` }), el('span', { text: task.submitted_at ? `已初报 ${task.submitted_at}` : '尚未初报' }), el('span', { text: `状态：${task.phase === 'paused' ? '暂停' : task.phase === 'closed' ? '已结项' : task.phase === 'open' ? '开放' : '尚未开放'}` })), el('div', { class: 'notice warning', text: '此入口不验证身份。请先逐人核实；一键全到只填写状态，仍需勾选确认并提交。' }));
+    const header = el('div', { class: 'quick-task-header' }, el('p', { class: 'quick-overline', text: '当晚登记' }), el('h1', { text: task.room }), el('p', { class: 'quick-subtitle', text: `${task.business_date} 晚 · 查寝 ${task.check_at.slice(11,16)} · 截止 ${task.due_at.slice(11,16)}` }), el('div', { class: 'quick-meta' }, el('span', { text: `成员 ${task.members.length} 人` }), el('span', { text: task.submitted_at ? `已初报 ${task.submitted_at}` : '尚未初报' }), el('span', { text: `状态：${task.phase === 'paused' ? '暂停' : task.phase === 'closed' ? '已结项' : task.phase === 'open' ? '开放' : '尚未开放'}` })), el('div', { class: 'notice warning', text: '此入口不验证身份。请先逐人核实；一键全到只填写状态，仍需勾选确认并提交。' }));
     const reload = button('重新读取', async () => {
       try { const data = await api('quick_lookup', state.identity); state.task = data.task; state.serverTime = data.server_time; state.retry = null; renderTask('已重新读取，请核对当前内容。'); }
       catch (error) { feedback(info, error.message, true); }
@@ -116,12 +116,12 @@
       const toggleLocation = () => { locationField.hidden = !['away','unknown'].includes(status.value); if (locationField.hidden && !member.immutable) location.value = ''; };
       status.addEventListener('change', toggleLocation); toggleLocation();
       const currentDetails = el('details', { class: 'quick-details' }, el('summary', {}, '迟报时情况已变化？填写当前状态'), field('现在的状态', current, '如查寝后已返寝或去向改变，单独填写当前情况。'), field('当前去向或已知情况', currentLocation), field('变化发生时间（选填）', occurred, '不确定时留空，以服务器接收时间记录。'));
-      const wrapper = el('div', { class: 'quick-member' }, el('div', { class: 'quick-member-head' }, el('h3', { text: member.name }), member.immutable ? el('span', { class: 'tag', text: '原始记录已存在，不可覆盖' }) : null), member.immutable ? el('p', { class: 'inline-hint', text: `已登记：${labels[member.initial_status] || member.initial_status}` }) : field('查寝时状态', status), member.immutable ? null : locationField, member.immutable ? null : currentDetails);
+      const wrapper = el('div', { class: 'quick-member' }, el('div', { class: 'quick-member-head' }, el('div', {}, el('h3', { text: member.name }), member.class_name ? el('span', { class: 'quick-class', text: member.class_name }) : null), member.immutable ? el('span', { class: 'tag', text: '原始记录已存在，不可覆盖' }) : null), member.immutable ? el('p', { class: 'inline-hint', text: `已登记：${labels[member.initial_status] || member.initial_status}` }) : field('查寝时状态', status), member.immutable ? null : locationField, member.immutable ? null : currentDetails);
       list.append(wrapper); rows.push({ member, status, location, current, currentLocation, occurred, toggleLocation });
     }
     const all = button('一键全到', () => { rows.filter(row => !row.member.immutable).forEach(row => { row.status.value = 'present'; row.location.value = ''; row.toggleLocation(); row.current.value = ''; row.current.dispatchEvent(new Event('change')); }); feedback(info, '已为可编辑成员填写“已在寝”，请逐人核实查寝时情况后确认提交。'); }, 'soft');
     const confirm = el('input', { type: 'checkbox', required: true }); const submit = el('button', { type: 'submit', class: 'button' }, '确认提交整寝初报');
-    const form = el('form', {}, el('div', { class: 'quick-actions' }, all), list, el('label', { class: 'checkbox' }, confirm, '我已逐人核实上述情况，确认如实提交。'), submit);
+    const form = el('form', { class: 'quick-check-form' }, el('div', { class: 'quick-bulk' }, el('div', {}, el('strong', { text: '逐人核实' }), el('p', { text: '如全员在寝，可先一键填写，再逐人检查。' })), all), list, el('div', { class: 'quick-submit' }, el('label', { class: 'checkbox' }, confirm, '我已逐人核实上述情况，确认如实提交。'), submit));
     if (task.phase !== 'open') { all.disabled = true; submit.disabled = true; form.prepend(el('div', { class: 'notice neutral', text: '查寝尚未开放，可以查看名单，开放后重新读取并提交。' })); }
     form.addEventListener('submit', async event => {
       event.preventDefault(); if (!form.reportValidity()) return;
@@ -146,7 +146,7 @@
       const toggleLocation = () => { locationField.hidden = !['away','unknown'].includes(select.value); if (locationField.hidden) location.value = ''; };
       select.addEventListener('change', toggleLocation); toggleLocation();
       const submit = el('button', { type: 'submit', class: 'button secondary small' }, '保存此人最新状态');
-      const form = el('form', { class: 'quick-member' }, el('div', { class: 'quick-member-head' }, el('h3', { text: member.name }), el('span', { class: 'tag', text: labels[member.current_status] || member.current_status })), field('更新为', select), locationField, submit);
+      const form = el('form', { class: 'quick-member' }, el('div', { class: 'quick-member-head' }, el('div', {}, el('h3', { text: member.name }), member.class_name ? el('span', { class: 'quick-class', text: member.class_name }) : null), el('span', { class: 'tag', text: labels[member.current_status] || member.current_status })), field('更新为', select), locationField, submit);
       form.addEventListener('submit', async event => {
         event.preventDefault();
         if (['away','unknown'].includes(select.value) && !location.value.trim()) { feedback(info, '外出未归或待核实人员请填写当前已知情况。', true); return; }

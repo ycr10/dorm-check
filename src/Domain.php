@@ -6,8 +6,10 @@ use PDO;
 
 final class Domain
 {
-    private const READS = ['tasks','task_history','dashboard','reports','followups','inspections','roster','grants','settings','audit','draft_get'];
+    private const READS = ['tasks','task_history','dashboard','reports','followups','inspections','roster','settings','audit','draft_get','classes'];
     private const STATUSES = ['present','away','exempt','unknown'];
+    private ?array $scope = null;
+    private ?array $scopeNames = null;
 
     public function __construct(private PDO $db, private array $config) {}
 
@@ -31,6 +33,7 @@ final class Domain
             }
             if (Schema::get($this->db, 'scheduler_cursor') === null) Schema::set($this->db, 'scheduler_cursor', substr($this->now(), 0, 10));
         });
+        Grade::install($this->db);
     }
 
     public function handle(string $action, array $user, array $data): array
@@ -41,7 +44,17 @@ final class Domain
             if (!$raw || $raw['status'] !== 'active') throw new ApiError('账号已失效', 'UNAUTHENTICATED', 401);
             if (Auth::totpPolicy($this->db, $raw)['totp_required'] && !$raw['totp_enabled']) throw new ApiError('请先绑定该账号的验证器', 'MFA_SETUP_REQUIRED', 403);
             $u = array_replace($user, $raw); $u['id'] = (int)$u['id'];
+            $this->scope=Grade::scope($this->db,$u); $this->scopeNames=null;
+            if (!empty($data['class_id']) && !in_array($action,['class_create','class_rename','class_permissions_save','room_leader_change'],true)) {
+                $class=Grade::requireClass($this->db,$u,$this->positive($data['class_id']));
+                $this->scope=[(int)$class['id']];
+            }
             return match ($action) {
+                'classes' => ['classes'=>Grade::classes($this->db,$u)],
+                'class_create' => $this->classCreate($u,$data),
+                'class_rename' => $this->classRename($u,$data),
+                'class_permissions_save' => $this->classPermissionsSave($u,$data),
+                'room_leader_change' => $this->roomLeaderChange($u,$data),
                 'tasks' => $this->listTasks($u, $data),
                 'task_history' => $this->history($u, $data),
                 'dashboard' => $this->dashboard($u, $data),
@@ -51,12 +64,10 @@ final class Domain
                 'export' => $this->export($u, $data),
                 'followups','inspections' => $this->activityList($action, $u, $data),
                 'followup_save','inspection_save' => $this->activitySave($action, $u, $data),
-                'roster','grants' => $this->roster($u),
+                'roster' => $this->roster($u),
                 'import_preview' => $this->importPreview($u, $data),
                 'import_commit' => $this->importCommit($u, $data),
                 'student_retire' => $this->retireStudent($u, $data),
-                'grant_save' => $this->grantSave($u, $data),
-                'grant_revoke' => $this->grantRevoke($u, $data),
                 'exemption_save' => $this->exemptionSave($u, $data),
                 'exemption_revoke' => $this->exemptionRevoke($u, $data),
                 'settings' => $this->getSettings($u),
@@ -69,6 +80,97 @@ final class Domain
                 default => throw new ApiError('接口不存在', 'NOT_FOUND', 404),
             };
         }, !in_array($action, self::READS, true));
+    }
+
+    private function classCreate(array $u, array $data): array
+    {
+        $this->manager($u,true); $this->recent($u);
+        $name=Support::text($data['name'] ?? '',100);
+        if ($name==='') throw new ApiError('请输入班级名称');
+        if (Support::one($this->db,'SELECT name FROM class_names WHERE name=?',[$name])) throw new ApiError('班级名称已使用，或为历史班级名称','DUPLICATE_CLASS',409);
+        Support::exec($this->db,'INSERT INTO classes (name,created_at) VALUES (?,?)',[$name,$this->now()]);
+        $id=(int)$this->db->lastInsertId();
+        Support::exec($this->db,'INSERT INTO class_names (name,class_id) VALUES (?,?)',[$name,$id]);
+        Audit::write($this->db,$u['id'],'class.create',['class_id'=>$id,'name'=>$name]);
+        return ['class'=>['id'=>$id,'name'=>$name]];
+    }
+
+    private function classRename(array $u, array $data): array
+    {
+        $this->manager($u,true); $this->recent($u);
+        $class=Grade::requireClass($this->db,$u,$this->positive($data['class_id'] ?? 0));
+        $name=Support::text($data['name'] ?? '',100);
+        if ($name==='') throw new ApiError('请输入班级名称');
+        if ($name===$class['name']) return ['class'=>$class];
+        if (Support::one($this->db,'SELECT name FROM class_names WHERE name=?',[$name])) throw new ApiError('班级名称已使用或属于历史班级','DUPLICATE_CLASS',409);
+        Support::exec($this->db,'INSERT INTO class_names (name,class_id) VALUES (?,?)',[$name,$class['id']]);
+        Support::exec($this->db,'UPDATE classes SET name=? WHERE id=?',[$name,$class['id']]);
+        $students=Support::all($this->db,'SELECT * FROM students WHERE class_name=? AND active=1',[$class['name']]);
+        foreach ($students as $student) {
+            Support::exec($this->db,'UPDATE students SET class_name=?,updated_at=? WHERE id=?',[$name,$this->now(),$student['id']]);
+            Support::exec($this->db,'UPDATE placements SET valid_to=? WHERE student_id=? AND valid_to IS NULL',[$this->now(),$student['id']]);
+            Support::exec($this->db,'INSERT INTO placements (student_id,room_id,student_no,name,class_name,leader_no,valid_from) VALUES (?,?,?,?,?,?,?)',[$student['id'],$student['room_id'],$student['student_no'],$student['name'],$name,$student['leader_no'],$this->now()]);
+        }
+        $this->prepare(substr($this->now(),0,10));
+        Audit::write($this->db,$u['id'],'class.rename',['class_id'=>(int)$class['id'],'before'=>$class['name'],'after'=>$name]);
+        return ['class'=>['id'=>(int)$class['id'],'name'=>$name]];
+    }
+
+    private function roomLeaderChange(array $u, array $data): array
+    {
+        $this->manager($u,true); $this->recent($u);
+        $room=$this->positive($data['room_id'] ?? 0); $no=Support::text($data['student_no'] ?? '',64); $reason=Support::text($data['reason'] ?? '',500);
+        if ($reason==='') throw new ApiError('请填写负责人交接原因');
+        $leader=Support::one($this->db,'SELECT id FROM students WHERE student_no=? AND room_id=? AND active=1',[$no,$room]);
+        if (!$leader) throw new ApiError('负责人必须是该寝的有效名册成员');
+        $members=Support::all($this->db,'SELECT * FROM students WHERE room_id=? AND active=1',[$room]);
+        if (!$members) throw new ApiError('寝室没有有效成员');
+        foreach ($members as $student) {
+            if ($student['leader_no']===$no) continue;
+            Support::exec($this->db,'UPDATE students SET leader_no=?,updated_at=? WHERE id=?',[$no,$this->now(),$student['id']]);
+            Support::exec($this->db,'UPDATE placements SET valid_to=? WHERE student_id=? AND valid_to IS NULL',[$this->now(),$student['id']]);
+            Support::exec($this->db,'INSERT INTO placements (student_id,room_id,student_no,name,class_name,leader_no,valid_from) VALUES (?,?,?,?,?,?,?)',[$student['id'],$room,$student['student_no'],$student['name'],$student['class_name'],$no,$this->now()]);
+        }
+        $this->prepare(substr($this->now(),0,10));
+        Audit::write($this->db,$u['id'],'room.leader_change',['room_id'=>$room,'student_no'=>$no,'reason'=>$reason]);
+        return ['message'=>'负责人已更新；已冻结的当晚记录不变'];
+    }
+
+    private function classPermissionsSave(array $u, array $data): array
+    {
+        $this->manager($u,true); $this->recent($u);
+        $id=$this->positive($data['user_id'] ?? 0);
+        $target=Support::one($this->db,"SELECT id FROM users WHERE id=? AND role='committee' AND status<>'disabled'",[$id]);
+        $classes=$data['class_ids'] ?? null;
+        if (!$target || !is_array($classes) || !array_is_list($classes) || count($classes)>500) throw new ApiError('请选择有效的班委和班级');
+        $classes=array_map(fn($id)=>$this->positive($id),$classes);
+        if (count($classes)!==count(array_unique($classes))) throw new ApiError('不能重复选择班级');
+        foreach ($classes as $class) Grade::requireClass($this->db,$u,$class);
+        Support::exec($this->db,'DELETE FROM class_permissions WHERE user_id=?',[$id]);
+        foreach ($classes as $class) Support::exec($this->db,'INSERT INTO class_permissions (user_id,class_id,created_at) VALUES (?,?,?)',[$id,$class,$this->now()]);
+        Support::exec($this->db,'UPDATE users SET auth_version=auth_version+1,updated_at=? WHERE id=?',[$this->now(),$id]);
+        Audit::write($this->db,$u['id'],'class.permissions',['user_id'=>$id,'class_ids'=>$classes]);
+        return ['message'=>'班级授权已更新'];
+    }
+
+    private function inScope(string $class): bool
+    {
+        if ($this->scope===null) return true;
+        if ($this->scopeNames===null) {
+            $this->scopeNames=[];
+            foreach (Support::all($this->db,'SELECT name,class_id FROM class_names') as $row) if (in_array((int)$row['class_id'],$this->scope,true)) $this->scopeNames[$row['name']]=true;
+        }
+        return isset($this->scopeNames[$class]);
+    }
+
+    private function scopedMember(array $member): void
+    {
+        if (!$this->inScope((string)$member['class_name'])) throw new ApiError('成员不在当前授权范围内','FORBIDDEN',403);
+    }
+
+    private function fullRoom(array $task): void
+    {
+        foreach (Support::all($this->db,'SELECT class_name FROM night_members WHERE task_id=? AND room_id=? AND included=1',[$task['task_id'],$task['room_id']]) as $m) $this->scopedMember($m);
     }
 
     private function manager(array $u, bool $admin = false): void
@@ -125,14 +227,8 @@ final class Domain
 
     private function authorized(array $u, array $t): bool
     {
-        if (in_array($u['role'], ['admin','committee'], true)) return true;
-        foreach (Support::all($this->db, 'SELECT * FROM grants WHERE user_id=? AND room_id=? AND revoked_at IS NULL', [$u['id'],$t['room_id']]) as $g) {
-            $now = $this->now();
-            if ($g['valid_from'] > $now || ($g['valid_to'] !== null && $g['valid_to'] < $now)) continue;
-            if ($g['task_id'] !== null) {
-                if ((int)$g['task_id'] === (int)$t['task_id']) return true;
-            } elseif ($t['business_date'] >= substr($g['valid_from'], 0, 10) && ($g['valid_to'] === null || $t['business_date'] <= substr($g['valid_to'], 0, 10))) return true;
-        }
+        if ($this->scope===null) return $u['role']==='admin';
+        foreach (Support::all($this->db,'SELECT class_name FROM night_members WHERE task_id=? AND room_id=? AND included=1',[$t['task_id'],$t['room_id']]) as $m) if ($this->inScope($m['class_name'])) return true;
         return false;
     }
 
@@ -143,6 +239,7 @@ final class Domain
         $t['room'] = $t['building'] . ' · ' . $t['room_number']; $t['late'] = (bool)$t['late'];
         if ($t['phase'] === 'draft' && $this->now() >= $t['check_at']) $t['phase'] = 'open';
         $members = Support::all($this->db, 'SELECT * FROM night_members WHERE task_id=? AND room_id=? AND included=1 ORDER BY student_no', [$t['task_id'],$t['room_id']]);
+        if ($this->scope!==null) $members=array_values(array_filter($members,fn($m)=>$this->inScope($m['class_name'])));
         foreach ($members as &$m) {
             foreach (['student_id','version'] as $key) $m[$key] = (int)$m[$key];
             $m['status'] = $m['current_status'];
@@ -152,6 +249,16 @@ final class Domain
         }
         unset($m); $t['members'] = $members; $t['roster_empty'] = count($members) === 0;
         $t['responsible'] = json_decode($t['responsible_json'], true, 512, JSON_THROW_ON_ERROR);
+        if ($this->scope!==null) {
+            $complete=count($members)>0 && !array_filter($members,fn($m)=>$m['initial_status']==='unreported' && $m['corrected_initial_status']===null);
+            $times=[];
+            foreach ($members as $member) {
+                $event=Support::one($this->db,"SELECT recorded_at FROM attendance_events WHERE task_id=? AND student_id=? AND type='initial' ORDER BY id LIMIT 1",[$t['task_id'],$member['student_id']]);
+                if ($event) $times[]=$event['recorded_at'];
+            }
+            sort($times); $t['submitted_at']=$complete && $times ? end($times) : ($complete ? ($t['submitted_at'] ?: $this->now()) : null);
+            $t['late']=(bool)array_filter($times,fn($time)=>$time>$t['due_at']); $t['responsible']=[]; $t['leader_no']=''; $t['leader_name']='';
+        }
         unset($t['responsible_json']);
         return $t;
     }
@@ -169,6 +276,10 @@ final class Domain
     {
         $t=$this->task($u,$data['task_id'] ?? '');
         $events=Support::all($this->db,'SELECT e.*,m.name AS student_name,m.student_no,r.building,r.room_number FROM attendance_events e LEFT JOIN night_members m ON m.task_id=e.task_id AND m.student_id=e.student_id JOIN room_tasks r ON r.task_id=e.task_id AND r.room_id=e.room_id WHERE e.task_id=? AND (e.room_id=? OR e.student_id IN (SELECT student_id FROM night_members WHERE task_id=? AND room_id=? AND included=1)) ORDER BY e.id',[$t['task_id'],$t['room_id'],$t['task_id'],$t['room_id']]);
+        if ($this->scope!==null) {
+            $visible=array_column($this->roomPayload($t)['members'],'student_id');
+            $events=array_values(array_filter($events,fn($e)=>$e['student_id']!==null && in_array((int)$e['student_id'],$visible,true)));
+        }
         foreach ($events as &$e) {
             $e['before']=json_decode($e['before_json'],true,512,JSON_THROW_ON_ERROR); $e['after']=json_decode($e['after_json'],true,512,JSON_THROW_ON_ERROR);
             $e['room']=$e['building'].' · '.$e['room_number']; unset($e['before_json'],$e['after_json']);
@@ -179,7 +290,7 @@ final class Domain
     private function dashboard(array $u, array $data): array
     {
         $this->manager($u); $date = $this->date($data['date'] ?? $this->businessDate());
-        $report = Reports::build($this->db,$date,$this->now());
+        $report = Reports::scoped($this->db,Reports::build($this->db,$date,$this->now()),$this->scope);
         return $report + ['tasks'=>$this->listTasks($u,['date'=>$date])['tasks'],'recent_events'=>array_slice(array_reverse($report['events']),0,30),'server_time'=>$this->now(),'job_runs'=>Support::all($this->db,'SELECT * FROM job_runs ORDER BY id DESC LIMIT 10')];
     }
 
@@ -191,7 +302,7 @@ final class Domain
     private function settingsValues(): array
     {
         $out = [];
-        foreach (['class_name','check_time','due_time','reminder_time','paused_dates','retention_days','totp_student_no'] as $key) $out[$key] = Schema::get($this->db,$key);
+        foreach (['grade_name','check_time','due_time','reminder_time','paused_dates','retention_days','totp_student_no'] as $key) $out[$key] = Schema::get($this->db,$key);
         return $out + self::publicSettings($this->db);
     }
 
@@ -298,10 +409,13 @@ final class Domain
         $key = Support::text($data['idempotency_key'] ?? '',100);
         if (!preg_match('/^[A-Za-z0-9._:\-]{12,100}$/D',$key)) throw new ApiError('提交缺少有效的去重标识');
         $hash = hash('sha256',Support::json($this->canonical($data)));
+        $scopeTag=hash('sha256',Support::json($this->scope));
         $saved = Support::one($this->db,'SELECT * FROM request_keys WHERE actor_id=? AND action=? AND token=?',[$u['id'],$action,$key]);
         if ($saved) {
             if (!hash_equals($saved['request_hash'],$hash)) throw new ApiError('同一提交标识不能用于不同内容，请重新打开表单', 'IDEMPOTENCY_CONFLICT',409);
-            return json_decode($saved['result_json'],true,512,JSON_THROW_ON_ERROR);
+            $cached=json_decode($saved['result_json'],true,512,JSON_THROW_ON_ERROR);
+            if (!is_array($cached) || !is_string($cached['scope_tag'] ?? null) || !hash_equals($cached['scope_tag'],$scopeTag) || !is_array($cached['result'] ?? null)) throw new ApiError('授权范围已变化，请重新读取当前结果', 'SCOPE_CHANGED',409);
+            return $cached['result'];
         }
         if ($this->now() < $t['check_at'] || !$t['frozen_at']) throw new ApiError('正式查寝尚未开放', 'TASK_NOT_OPEN',409);
         if (in_array($t['phase'],['closed','paused'],true)) throw new ApiError('任务已结项或暂停，请联系班委', 'TASK_CLOSED',409);
@@ -311,7 +425,7 @@ final class Domain
         else $this->correct($u,$t,$data);
         Support::exec($this->db,'UPDATE room_tasks SET report_version=report_version+1,updated_at=? WHERE task_id=? AND room_id=?',[$this->now(),$t['task_id'],$t['room_id']]);
         $result = ['task'=>$this->roomPayload($this->task($u,$data['task_id']))];
-        Support::exec($this->db,'INSERT INTO request_keys (actor_id,action,token,request_hash,result_json,created_at) VALUES (?,?,?,?,?,?)',[$u['id'],$action,$key,$hash,Support::json($result),$this->now()]);
+        Support::exec($this->db,'INSERT INTO request_keys (actor_id,action,token,request_hash,result_json,created_at) VALUES (?,?,?,?,?,?)',[$u['id'],$action,$key,$hash,Support::json(['scope_tag'=>$scopeTag,'result'=>$result]),$this->now()]);
         Audit::write($this->db,$u['id'],$action,['task_id'=>$data['task_id'],'version'=>$t['report_version']+1]);
         return $result;
     }
@@ -337,15 +451,15 @@ final class Domain
         $now=$this->now(); $today=substr($now,0,10); $date=$this->businessDate($now);
         if ($date!==$today && !Support::one($this->db,'SELECT id FROM night_tasks WHERE business_date=?',[$date])) throw new ApiError('未找到唯一的当晚寝室任务，请核对信息或联系班委','QUICK_NOT_FOUND',404);
         $this->prepare($date);
-        $matches=Support::all($this->db,'SELECT r.*,n.business_date,n.check_at,n.due_at,n.frozen_at FROM room_tasks r JOIN night_tasks n ON n.id=r.task_id JOIN students s ON s.student_no=r.leader_no AND s.room_id=r.room_id AND s.active=1 WHERE n.business_date=? AND r.room_number=? AND r.leader_no=? AND s.leader_no=r.leader_no',[$date,$room,$no]);
-        $matches=array_values(array_filter($matches,fn($t)=>$t['room_number']===$room && $t['leader_no']===$no));
+        $matches=Support::all($this->db,'SELECT r.*,n.business_date,n.check_at,n.due_at,n.frozen_at,s.student_no AS claimed_no FROM room_tasks r JOIN night_tasks n ON n.id=r.task_id JOIN students s ON s.room_id=r.room_id AND s.active=1 WHERE n.business_date=? AND r.room_number=? AND s.student_no=? AND s.leader_no=s.student_no',[$date,$room,$no]);
+        $matches=array_values(array_filter($matches,fn($t)=>$t['room_number']===$room && $t['claimed_no']===$no));
         if (count($matches)!==1) throw new ApiError('未找到唯一的当晚寝室任务，请核对信息或联系班委','QUICK_NOT_FOUND',404);
         return $matches[0];
     }
 
     private function quickPayload(array $t): array
     {
-        $members=Support::all($this->db,'SELECT student_id,name,initial_status,initial_location,corrected_initial_status,current_status FROM night_members WHERE task_id=? AND room_id=? AND included=1 ORDER BY student_no',[$t['task_id'],$t['room_id']]);
+        $members=Support::all($this->db,'SELECT student_id,name,class_name,initial_status,initial_location,corrected_initial_status,current_status FROM night_members WHERE task_id=? AND room_id=? AND included=1 ORDER BY student_no',[$t['task_id'],$t['room_id']]);
         foreach ($members as &$m) { $m['student_id']=(int)$m['student_id']; $m['immutable']=$m['initial_status']!=='unreported' || $m['corrected_initial_status']!==null; }
         unset($m);
         return ['business_date'=>$t['business_date'],'room'=>$t['building'].' · '.$t['room_number'],'check_at'=>$t['check_at'],'due_at'=>$t['due_at'],'phase'=>$t['phase'],'submitted_at'=>$t['submitted_at'],'roster_version'=>(int)$t['roster_version'],'version'=>(int)$t['report_version'],'members'=>$members];
@@ -353,6 +467,7 @@ final class Domain
 
     public function quick(string $action, array $data, string $client): array
     {
+        $this->scope=null;
         if (!in_array($action,['quick_lookup','quick_initial','quick_update'],true)) throw new ApiError('接口不存在','NOT_FOUND',404);
         $this->quickLimit($client,$action==='quick_lookup'?'lookup':'submit');
         return Schema::transaction($this->db,function () use ($action,$data): array {
@@ -384,6 +499,7 @@ final class Domain
         if ($t['submitted_at']) throw new ApiError('已经完成初报，请使用补报或更正', 'ALREADY_SUBMITTED',409);
         if ((string)($data['roster_version'] ?? '') !== (string)$t['roster_version']) throw new ApiError('当晚名册已变化，请重新核对', 'ROSTER_CONFLICT',409);
         $members = Support::all($this->db,'SELECT * FROM night_members WHERE task_id=? AND room_id=? AND included=1 ORDER BY student_id',[$t['task_id'],$t['room_id']]);
+        if ($this->scope!==null) $members=array_values(array_filter($members,fn($m)=>$this->inScope($m['class_name'])));
         $rows = $data['members'] ?? null;
         if (!is_array($rows) || !array_is_list($rows) || count($rows) !== count($members) || !$members) throw new ApiError('初报必须包含本寝完整名单');
         $map = [];
@@ -412,7 +528,8 @@ final class Domain
             Support::exec($this->db,'UPDATE night_members SET initial_status=?,initial_location=?,current_status=?,location=?,expected_return_at=?,return_at=?,updated_at=?,version=version+1 WHERE task_id=? AND student_id=?',[$initial,$location,$current,$currentLocation,$expected,$return,$this->now(),$t['task_id'],$id]);
             $this->event($u,$t,$id,'initial',['current_status'=>'unreported'],$after,'',$occurred);
         }
-        Support::exec($this->db,'UPDATE room_tasks SET submitted_at=?,late=? WHERE task_id=? AND room_id=?',[$this->now(),$this->now() > $t['due_at'] ? 1 : 0,$t['task_id'],$t['room_id']]);
+        $remaining=Support::one($this->db,"SELECT COUNT(*) AS n FROM night_members WHERE task_id=? AND room_id=? AND included=1 AND initial_status='unreported' AND corrected_initial_status IS NULL",[$t['task_id'],$t['room_id']]);
+        if ((int)$remaining['n']===0) Support::exec($this->db,'UPDATE room_tasks SET submitted_at=?,late=? WHERE task_id=? AND room_id=?',[$this->now(),$this->now() > $t['due_at'] ? 1 : 0,$t['task_id'],$t['room_id']]);
         Support::exec($this->db,'DELETE FROM drafts WHERE task_id=? AND room_id=?',[$t['task_id'],$t['room_id']]);
     }
 
@@ -421,12 +538,12 @@ final class Domain
         $id = $this->positive($id);
         $m = Support::one($this->db,'SELECT * FROM night_members WHERE task_id=? AND room_id=? AND student_id=? AND included=1',[$t['task_id'],$t['room_id'],$id]);
         if (!$m) throw new ApiError('成员不在当前任务授权范围内', 'FORBIDDEN',403);
+        $this->scopedMember($m);
         return $m;
     }
 
     private function update(array $u, array $t, array $data): void
     {
-        if (!$t['submitted_at']) throw new ApiError('请先完成整寝初报', 'INITIAL_REQUIRED',409);
         $ids = $data['student_ids'] ?? null;
         if (!is_array($ids) || !array_is_list($ids) || !$ids || count($ids) > 1000) throw new ApiError('请选择需要更新的人员');
         $ids = array_map(fn($id)=>$this->positive($id),$ids);
@@ -436,6 +553,7 @@ final class Domain
         $occurred = empty($data['occurred_at']) ? null : $this->datetime($data['occurred_at']);
         if ($occurred !== null && ($occurred < $t['check_at'] || $occurred > $this->now())) throw new ApiError('返寝时间必须在查寝时点与接收时点之间');
         foreach ($members as $m) {
+            if ($m['initial_status']==='unreported' && $m['corrected_initial_status']===null) throw new ApiError('请先登记该成员的初报','INITIAL_REQUIRED',409);
             $status = $this->status($data['status'] ?? '',(int)$m['student_id'],$t['business_date'],$location);
             $return = $status === 'present' ? ($occurred ?? $this->now()) : null;
             $after = ['current_status'=>$status,'location'=>$location,'return_at'=>$return];
@@ -446,10 +564,13 @@ final class Domain
 
     private function correct(array $u, array $t, array $data): void
     {
-        if (!$t['submitted_at']) throw new ApiError('请先完成整寝初报', 'INITIAL_REQUIRED',409);
         $m = $this->member($t,$data['student_id'] ?? 0); $target = $data['target'] ?? 'current';
         if (!in_array($target,['initial','current'],true)) throw new ApiError('更正范围无效');
         if ($target === 'initial') $this->manager($u);
+        if ($m['initial_status']==='unreported' && $m['corrected_initial_status']===null) {
+            $reported=array_filter($this->roomPayload($t)['members'],fn($member)=>$member['initial_status']!=='unreported' || $member['corrected_initial_status']!==null);
+            if ($target!=='initial' || !$reported) throw new ApiError('请先登记该成员的初报','INITIAL_REQUIRED',409);
+        }
         $reason = Support::text($data['reason'] ?? '',500); if ($reason === '') throw new ApiError('更正必须说明原因');
         $location = Support::text($data['location'] ?? '',200); $status = $this->status($data['status'] ?? '',(int)$m['student_id'],$t['business_date'],$location);
         if ($target === 'initial') {
@@ -464,21 +585,33 @@ final class Domain
             Support::exec($this->db,'UPDATE night_members SET current_status=?,location=?,return_at=NULL,updated_at=?,version=version+1 WHERE task_id=? AND student_id=?',[$status,$location,$this->now(),$t['task_id'],$m['student_id']]);
         }
         $this->event($u,$t,(int)$m['student_id'],'correct',$m,$after,$reason);
+        if ($target==='initial' && !$t['submitted_at']) {
+            $remaining=Support::one($this->db,"SELECT COUNT(*) AS n FROM night_members WHERE task_id=? AND room_id=? AND included=1 AND initial_status='unreported' AND corrected_initial_status IS NULL",[$t['task_id'],$t['room_id']]);
+            if ((int)$remaining['n']===0) Support::exec($this->db,'UPDATE room_tasks SET submitted_at=?,late=? WHERE task_id=? AND room_id=?',[$this->now(),$this->now()>$t['due_at']?1:0,$t['task_id'],$t['room_id']]);
+        }
     }
 
     private function roster(array $u): array
     {
         $this->manager($u);
-        return [
-            'students'=>Support::all($this->db,'SELECT s.*,r.building,r.room_number,r.room_number AS room FROM students s JOIN rooms r ON r.id=s.room_id WHERE s.active=1 ORDER BY s.student_no'),
-            'rooms'=>Support::all($this->db,'SELECT * FROM rooms ORDER BY building,room_number'),
-            'users'=>Support::all($this->db,'SELECT id,student_no,name,role,status,totp_enabled FROM users ORDER BY id'),
-            'grants'=>Support::all($this->db,'SELECT g.*,u.name AS user_name,u.student_no,r.building,r.room_number FROM grants g JOIN users u ON u.id=g.user_id JOIN rooms r ON r.id=g.room_id WHERE g.revoked_at IS NULL ORDER BY g.id'),
-            'exemptions'=>Support::all($this->db,'SELECT e.*,s.name AS student_name,s.student_no FROM exemptions e JOIN students s ON s.id=e.student_id WHERE e.revoked_at IS NULL ORDER BY e.id'),
-        ];
+        $students=Support::all($this->db,'SELECT s.*,r.building,r.room_number,r.room_number AS room FROM students s JOIN rooms r ON r.id=s.room_id WHERE s.active=1 ORDER BY s.student_no');
+        $students=array_values(array_filter($students,fn($s)=>$this->inScope($s['class_name'])));
+        if ($this->scope!==null) foreach ($students as &$student) {
+            $leader=Support::one($this->db,'SELECT class_name FROM students WHERE student_no=?',[$student['leader_no']]);
+            if (!$leader || !$this->inScope($leader['class_name'])) $student['leader_no']='';
+        }
+        unset($student);
+        $studentIds=array_map(fn($s)=>(int)$s['id'],$students);
+        $roomIds=array_unique(array_map(fn($s)=>(int)$s['room_id'],$students));
+        $rooms=array_values(array_filter(Support::all($this->db,'SELECT * FROM rooms ORDER BY building,room_number'),fn($r)=>in_array((int)$r['id'],$roomIds,true)));
+        $exemptions=Support::all($this->db,'SELECT e.*,s.name AS student_name,s.student_no FROM exemptions e JOIN students s ON s.id=e.student_id WHERE e.revoked_at IS NULL ORDER BY e.id');
+        $exemptions=array_values(array_filter($exemptions,fn($e)=>in_array((int)$e['student_id'],$studentIds,true)));
+        $users=$u['role']==='admin'?Support::all($this->db,"SELECT id,student_no,name,role,status,totp_enabled FROM users WHERE role IN ('admin','committee') ORDER BY id"):[];
+        $permissions=$u['role']==='admin'?Support::all($this->db,'SELECT user_id,class_id FROM class_permissions WHERE revoked_at IS NULL ORDER BY user_id,class_id'):[];
+        return ['students'=>$students,'rooms'=>$rooms,'users'=>$users,'grants'=>[],'exemptions'=>$exemptions,'classes'=>Grade::classes($this->db,$u),'class_permissions'=>$permissions];
     }
 
-    private function parseCsv(mixed $value): array
+    private function parseCsv(mixed $value, array $class, array $u): array
     {
         if (!is_string($value) || strlen($value) > 2*1024*1024 || str_contains($value,"\0") || !mb_check_encoding($value,'UTF-8')) throw new ApiError('请使用不超过 2 MB 的 UTF-8 CSV');
         $csv = preg_replace('/^\xEF\xBB\xBF/','',$value) ?? $value;
@@ -503,9 +636,8 @@ final class Domain
                     foreach (['student_no'=>64,'name'=>100,'building'=>100,'room'=>100,'leader_no'=>64] as $key=>$max) {
                         $r[$key] = Support::text($raw[$key] ?? '',$max); if ($r[$key]==='') throw new ApiError('必填列不能为空：'.$key);
                     }
-                    $class = (string)Schema::get($this->db,'class_name','示例班级');
-                    $r['class_name'] = Support::text($raw['class_name'] ?? '',100) ?: $class;
-                    if ($r['class_name']!==$class) throw new ApiError('班级与系统设置不符，请先核实名单或修改班级设置');
+                    $r['class_name'] = Support::text($raw['class_name'] ?? '',100) ?: $class['name'];
+                    if ($r['class_name']!==$class['name']) throw new ApiError('名单班级与选定班级不一致');
                     foreach (['student_no','leader_no'] as $key) if (!preg_match('/^[A-Za-z0-9_-]{3,64}$/D',$r[$key])) throw new ApiError('学号仅支持 3—64 位字母、数字、下划线及短横线');
                     if (isset($seen[$r['student_no']])) throw new ApiError('重复学号：'.$r['student_no']);
                     $seen[$r['student_no']]=true;
@@ -519,30 +651,54 @@ final class Domain
                 if ($line>1100) throw new ApiError('CSV 行数过多');
             }
             $known=[];
-            foreach (Support::all($this->db,'SELECT student_no,name FROM students WHERE active=1') as $s) $known[$s['student_no']]=$s['name'];
-            foreach ($rows as $r) $known[$r['student_no']]=$r['name'];
-            foreach ($rows as $i=>$r) if (!isset($known[$r['leader_no']])) $errors[]='第 '.($i+2).' 行负责人学号未在本次或现有名册中找到：'.$r['leader_no'];
+            foreach (Support::all($this->db,'SELECT s.student_no,rm.building,rm.room_number FROM students s JOIN rooms rm ON rm.id=s.room_id WHERE s.active=1') as $s) $known[$s['student_no']]=[$s['building'],$s['room_number']];
+            foreach ($rows as $r) $known[$r['student_no']]=[$r['building'],$r['room']];
+            foreach ($rows as $i=>$r) {
+                $student=Support::one($this->db,'SELECT class_name FROM students WHERE student_no=?',[$r['student_no']]);
+                if ($student && Grade::classId($this->db,$student['class_name'])!==(int)$class['id']) {
+                    if (!Grade::includes($this->db,Grade::scope($this->db,$u),$student['class_name'])) $errors[]='第 '.($i+2).' 行无法导入，请联系管理员核实学号';
+                    else $warnings[]='存在转班学生，确认导入将改变其后续班级；历史记录不变。';
+                }
+                $other=Support::all($this->db,'SELECT s.student_no,s.leader_no FROM students s JOIN rooms rm ON rm.id=s.room_id WHERE s.active=1 AND rm.building=? AND rm.room_number=?',[$r['building'],$r['room']]);
+                foreach ($other as $existing) if (!isset($seen[$existing['student_no']]) && $existing['leader_no']!==$r['leader_no']) $errors[]='第 '.($i+2).' 行宿舍负责人与已有名单冲突，请联系管理员核实';
+                if (!isset($known[$r['leader_no']]) || $known[$r['leader_no']]!==[$r['building'],$r['room']]) $warnings[]='存在未导入或不在本宿舍的负责人；核实并补齐前，该宿舍无法便捷登记。';
+                $old=Support::one($this->db,'SELECT s.leader_no,rm.building,rm.room_number FROM students s JOIN rooms rm ON rm.id=s.room_id WHERE s.student_no=? AND s.active=1',[$r['student_no']]);
+                if ($old && $old['leader_no']===$r['student_no'] && ($old['building']!==$r['building'] || $old['room_number']!==$r['room'] || $r['leader_no']!==$r['student_no'])) {
+                    foreach (Support::all($this->db,'SELECT student_no FROM students WHERE active=1 AND leader_no=? AND student_no<>?',[$r['student_no'],$r['student_no']]) as $dependent) if (!isset($seen[$dependent['student_no']])) $errors[]='负责人变动影响未列入名单的宿舍成员，请先由管理员完成交接';
+                }
+            }
             if (!$rows && !$errors) $errors[]='名单中没有数据行';
             if ($rows) $warnings[]='未出现在本次文件中的现有学生不会自动删除；已冻结的当晚名册不会被导入覆盖。';
         } finally { fclose($stream); }
-        return ['rows'=>$rows,'errors'=>$errors,'warnings'=>array_values(array_unique($warnings)),'count'=>count($rows)];
+        $changes=['added'=>0,'updated'=>0,'unchanged'=>0,'conflict'=>0];
+        $userScope=Grade::scope($this->db,$u);
+        foreach ($rows as &$row) {
+            $old=Support::one($this->db,'SELECT s.*,rm.building,rm.room_number FROM students s JOIN rooms rm ON rm.id=s.room_id WHERE s.student_no=?',[$row['student_no']]);
+            $same=$old && $old['name']===$row['name'] && $old['class_name']===$row['class_name'] && $old['building']===$row['building'] && $old['room_number']===$row['room'] && $old['leader_no']===$row['leader_no'] && (int)$old['active']===1;
+            $row['operation']=$old && !Grade::includes($this->db,$userScope,$old['class_name'])?'conflict':(!$old?'added':($same?'unchanged':'updated')); $changes[$row['operation']]++;
+        }
+        unset($row);
+        return ['rows'=>$rows,'errors'=>$errors,'warnings'=>array_values(array_unique($warnings)),'count'=>count($rows),'changes'=>$changes];
     }
 
-    private function previewHash(string $csv, int $actor): string
+    private function previewHash(string $csv, int $actor, int $classId): string
     {
-        return hash_hmac('sha256',$actor."\n".Schema::get($this->db,'class_name')."\n".$csv,(string)$this->config['app_key']);
+        $roster=Support::all($this->db,'SELECT student_no,name,class_name,room_id,leader_no,active,updated_at FROM students ORDER BY student_no');
+        return hash_hmac('sha256',$actor."\n".$classId."\n".Support::json($roster)."\n".$csv,(string)$this->config['app_key']);
     }
 
     private function importPreview(array $u, array $data): array
     {
-        $this->manager($u); $result=$this->parseCsv($data['csv'] ?? null);
-        return $result+['hash'=>$this->previewHash($data['csv'],$u['id'])];
+        $this->manager($u); $class=Grade::requireClass($this->db,$u,$this->positive($data['class_id'] ?? 0));
+        $result=$this->parseCsv($data['csv'] ?? null,$class,$u);
+        return $result+['hash'=>$this->previewHash($data['csv'],$u['id'],(int)$class['id'])];
     }
 
     private function importCommit(array $u, array $data): array
     {
-        $this->manager($u); $parsed=$this->parseCsv($data['csv'] ?? null);
-        if (($data['confirm'] ?? null)!==true || !is_string($data['hash'] ?? null) || !hash_equals($this->previewHash($data['csv'],$u['id']),$data['hash'])) throw new ApiError('请重新预览并确认这份名单', 'PREVIEW_REQUIRED',409);
+        $this->manager($u); $class=Grade::requireClass($this->db,$u,$this->positive($data['class_id'] ?? 0));
+        $parsed=$this->parseCsv($data['csv'] ?? null,$class,$u);
+        if (($data['confirm'] ?? null)!==true || !is_string($data['hash'] ?? null) || !hash_equals($this->previewHash($data['csv'],$u['id'],(int)$class['id']),$data['hash'])) throw new ApiError('请重新预览并确认这份名单', 'PREVIEW_REQUIRED',409);
         if ($parsed['errors']) throw new ApiError('名单仍有问题，不能导入');
         $added=0; $updated=0;
         foreach ($parsed['rows'] as $r) {
@@ -569,6 +725,7 @@ final class Domain
         if ($reason==='') throw new ApiError('移出当前名册必须填写核实原因');
         $s=Support::one($this->db,'SELECT * FROM students WHERE id=? AND active=1',[$id]);
         if (!$s) throw new ApiError('有效名册中没有此学生', 'NOT_FOUND',404);
+        $this->scopedMember($s);
         if (Support::one($this->db,'SELECT id FROM students WHERE leader_no=? AND active=1 AND id<>? LIMIT 1',[$s['student_no'],$id])) throw new ApiError('此同学仍被其他学生列为寝室负责人，请先导入核实后的负责人关系');
         Support::exec($this->db,'UPDATE students SET active=0,updated_at=? WHERE id=?',[$this->now(),$id]);
         Support::exec($this->db,'UPDATE placements SET valid_to=? WHERE student_id=? AND valid_to IS NULL',[$this->now(),$id]);
@@ -577,36 +734,12 @@ final class Domain
         return ['message'=>'已移出当前名册；已冻结的旧晚记录和账号授权未自动删除，请另行核实处理'];
     }
 
-    private function grantSave(array $u, array $data): array
-    {
-        $this->manager($u); $this->recent($u);
-        $user=$this->positive($data['user_id'] ?? 0); $room=$this->positive($data['room_id'] ?? 0);
-        $target=Support::one($this->db,'SELECT id,role,status FROM users WHERE id=?',[$user]);
-        if (!$target || $target['role']!=='leader' || $target['status']==='disabled' || !Support::one($this->db,'SELECT id FROM rooms WHERE id=?',[$room])) throw new ApiError('请选择有效的寝室长或代理账号及寝室');
-        $from=$this->datetime($data['valid_from'] ?? ''); $to=empty($data['valid_to']) ? null : $this->datetime($data['valid_to'],true);
-        if ($to!==null && $to<$from) throw new ApiError('到期时间不能早于生效时间');
-        $task=null;
-        if (!empty($data['task_id'])) {
-            [$task,$keyRoom]=$this->taskKey($data['task_id']);
-            if ($keyRoom!==$room || !Support::one($this->db,'SELECT task_id FROM room_tasks WHERE task_id=? AND room_id=?',[$task,$room])) throw new ApiError('指定任务与寝室不匹配');
-        } elseif (substr($from,0,10)<substr($this->now(),0,10)) throw new ApiError('交接旧晚任务请明确填写完整任务编号，不回溯授予所有旧任务');
-        Support::exec($this->db,'INSERT INTO grants (user_id,room_id,valid_from,valid_to,task_id,actor_id,created_at) VALUES (?,?,?,?,?,?,?)',[$user,$room,$from,$to,$task,$u['id'],$this->now()]); $id=(int)$this->db->lastInsertId();
-        Audit::write($this->db,$u['id'],'grant.save',['grant_id'=>$id,'user_id'=>$user,'room_id'=>$room,'task_id'=>$task,'valid_from'=>$from,'valid_to'=>$to]);
-        return ['grant'=>Support::one($this->db,'SELECT * FROM grants WHERE id=?',[$id])];
-    }
-
-    private function grantRevoke(array $u, array $data): array
-    {
-        $this->manager($u); $this->recent($u); $id=$this->positive($data['grant_id'] ?? 0);
-        if (!Support::one($this->db,'SELECT id FROM grants WHERE id=? AND revoked_at IS NULL',[$id])) throw new ApiError('授权不存在或已经撤销', 'NOT_FOUND',404);
-        Support::exec($this->db,'UPDATE grants SET revoked_at=? WHERE id=?',[$this->now(),$id]);
-        Audit::write($this->db,$u['id'],'grant.revoke',['grant_id'=>$id]); return ['message'=>'授权已撤销'];
-    }
-
     private function exemptionSave(array $u, array $data): array
     {
         $this->manager($u); $student=$this->positive($data['student_id'] ?? 0);
-        if (!Support::one($this->db,'SELECT id FROM students WHERE id=? AND active=1',[$student])) throw new ApiError('学生不存在');
+        $studentRow=Support::one($this->db,'SELECT id,class_name FROM students WHERE id=? AND active=1',[$student]);
+        if (!$studentRow) throw new ApiError('学生不存在');
+        $this->scopedMember($studentRow);
         $start=$this->date($data['start_date'] ?? ''); $end=$this->date($data['end_date'] ?? '');
         $source=Support::text($data['source'] ?? '',200); $note=Support::text($data['note'] ?? '',500);
         if ($end<$start || $source==='' || ($data['approved'] ?? null)!==true) throw new ApiError('请核实有效日期、许可来源并明确确认');
@@ -621,6 +754,12 @@ final class Domain
         if ($reason==='') throw new ApiError('撤销必须填写原因');
         $e=Support::one($this->db,'SELECT * FROM exemptions WHERE id=? AND revoked_at IS NULL',[$id]);
         if (!$e) throw new ApiError('安排不存在或已经撤销', 'NOT_FOUND',404);
+        $studentRow=Support::one($this->db,'SELECT class_name FROM students WHERE id=?',[$e['student_id']]);
+        if (!$studentRow) throw new ApiError('学生不存在');
+        $this->scopedMember($studentRow);
+        if ($this->scope!==null) {
+            foreach (Support::all($this->db,'SELECT m.class_name FROM night_members m JOIN night_tasks n ON n.id=m.task_id WHERE m.student_id=? AND n.business_date>=? AND n.business_date<=?',[$e['student_id'],$e['start_date'],$e['end_date']]) as $history) $this->scopedMember($history);
+        }
         Support::exec($this->db,'UPDATE exemptions SET revoked_at=?,revoke_reason=? WHERE id=?',[$this->now(),$reason,$id]);
         $members=Support::all($this->db,"SELECT m.*,n.business_date FROM night_members m JOIN night_tasks n ON n.id=m.task_id JOIN room_tasks r ON r.task_id=m.task_id AND r.room_id=m.room_id WHERE m.student_id=? AND m.included=1 AND m.current_status='exempt' AND r.phase='open' AND n.business_date>=? AND n.business_date<=?",[$e['student_id'],$e['start_date'],$e['end_date']]);
         foreach ($members as $m) {
@@ -637,6 +776,18 @@ final class Domain
     {
         $this->manager($u); $date=$this->date($data['date'] ?? $this->businessDate());
         $items=Support::all($this->db,"SELECT a.*,r.building,r.room_number FROM $action a JOIN night_tasks n ON n.id=a.task_id JOIN room_tasks r ON r.task_id=a.task_id AND r.room_id=a.room_id WHERE n.business_date=? ORDER BY a.id",[$date]);
+        if ($this->scope!==null) {
+            $items=array_values(array_filter($items,function ($item) use ($action): bool {
+                if ($action==='followups') {
+                    $member=Support::one($this->db,'SELECT class_name FROM night_members WHERE task_id=? AND student_id=?',[$item['task_id'],$item['student_id']]);
+                    return $member && $this->inScope($member['class_name']);
+                }
+                $members=Support::all($this->db,'SELECT class_name FROM night_members WHERE task_id=? AND room_id=? AND included=1',[$item['task_id'],$item['room_id']]);
+                if (!$members) return false;
+                foreach ($members as $member) if (!$this->inScope($member['class_name'])) return false;
+                return true;
+            }));
+        }
         foreach ($items as &$item) { $item['task_id']=$item['task_id'].'.'.$item['room_id']; $item['room']=$item['building'].' · '.$item['room_number']; }
         unset($item); return ['items'=>$items];
     }
@@ -651,6 +802,7 @@ final class Domain
             if (!in_array($state,['pending','contacted','safe','waiting','closed'],true)) throw new ApiError('联系进度无效');
             Support::exec($this->db,'INSERT INTO followups (task_id,room_id,student_id,state,note,actor_id,actor_name,created_at) VALUES (?,?,?,?,?,?,?,?)',[$t['task_id'],$t['room_id'],$m['student_id'],$state,$note,$u['id'],$u['name'],$this->now()]); $table='followups';
         } else {
+            $this->fullRoom($t);
             if (isset($data['room_id']) && (int)$data['room_id']!==(int)$t['room_id']) throw new ApiError('寝室与任务不匹配');
             $result=Support::text($data['result'] ?? '',100); if ($result==='') throw new ApiError('请填写抽查结果');
             Support::exec($this->db,'INSERT INTO inspections (task_id,room_id,result,note,actor_id,actor_name,created_at) VALUES (?,?,?,?,?,?,?)',[$t['task_id'],$t['room_id'],$result,$note,$u['id'],$u['name'],$this->now()]); $table='inspections';
@@ -661,7 +813,7 @@ final class Domain
 
     private function getSettings(array $u): array
     {
-        $this->manager($u);
+        $this->manager($u,true);
         return ['settings'=>$this->settingsValues(),'job_runs'=>Support::all($this->db,'SELECT * FROM job_runs ORDER BY id DESC LIMIT 20')];
     }
 
@@ -669,12 +821,12 @@ final class Domain
     {
         $this->manager($u,true); $this->recent($u); $s=$data['settings'] ?? null;
         if (!is_array($s)) throw new ApiError('设置格式不正确');
-        $allowed=['class_name','check_time','due_time','reminder_time','paused_dates','retention_days','totp_student_no','filing_icp','filing_police'];
+        $allowed=['grade_name','check_time','due_time','reminder_time','paused_dates','retention_days','totp_student_no','filing_icp','filing_police'];
         foreach ($s as $key=>$v) {
             if (!in_array($key,$allowed,true)) throw new ApiError('不支持的设置项：'.$key);
             if (in_array($key,['check_time','due_time','reminder_time'],true)) {
                 if (!is_string($v) || !preg_match('/^(?:[01][0-9]|2[0-3]):[0-5][0-9]$/D',$v)) throw new ApiError('时间请使用 HH:mm 格式');
-            } elseif ($key==='class_name') { $v=Support::text($v,100); if ($v==='') throw new ApiError('班级不能为空'); }
+            } elseif ($key==='grade_name') { $v=Support::text($v,100); if ($v==='') throw new ApiError('年级名称不能为空'); }
             elseif (in_array($key,['filing_icp','filing_police'],true)) {
                 if (!is_string($v)) throw new ApiError('备案号必须为文字');
                 $v=Support::text($v,100);
@@ -733,7 +885,7 @@ final class Domain
     private function report(array $u, array $data): array
     {
         $this->manager($u); $date=$this->date($data['date'] ?? $this->businessDate());
-        return Reports::load($this->db,$date,$data['version'] ?? 'latest',$this->now());
+        return Reports::scoped($this->db,Reports::load($this->db,$date,$data['version'] ?? 'latest',$this->now()),$this->scope);
     }
 
     private function snapshot(array $u, array $data): array
@@ -741,7 +893,7 @@ final class Domain
         $this->manager($u); $date=$this->date($data['date'] ?? $this->businessDate());
         $reason=Support::text($data['reason'] ?? '班委手动保存',500);
         $result=Reports::save($this->db,$date,$this->now(),$reason);
-        Audit::write($this->db,$u['id'],'report.snapshot',['date'=>$date,'version'=>$result['version'],'reason'=>$reason]); return $result;
+        Audit::write($this->db,$u['id'],'report.snapshot',['date'=>$date,'version'=>$result['version'],'reason'=>$reason]); return Reports::scoped($this->db,$result,$this->scope);
     }
 
     private function export(array $u, array $data): array
@@ -765,7 +917,7 @@ final class Domain
 
     private function closeTask(string $action, array $u, array $data): array
     {
-        $this->manager($u); $t=$this->task($u,$data['task_id'] ?? '',true); $reason=Support::text($data['reason'] ?? '',500);
+        $this->manager($u); $t=$this->task($u,$data['task_id'] ?? '',true); $this->fullRoom($t); $reason=Support::text($data['reason'] ?? '',500);
         if ($reason==='') throw new ApiError('请填写操作原因');
         if ($action==='task_close') {
             if ($t['phase']!=='open' || !$t['submitted_at']) throw new ApiError('只有完成初报的开放任务可以结项', 'TASK_NOT_READY',409);
@@ -786,7 +938,7 @@ final class Domain
 
     private function adjustRoster(array $u, array $data): array
     {
-        $this->manager($u); $t=$this->task($u,$data['task_id'] ?? '',true); $reason=Support::text($data['reason'] ?? '',500);
+        $this->manager($u); $t=$this->task($u,$data['task_id'] ?? '',true); $this->fullRoom($t); $reason=Support::text($data['reason'] ?? '',500);
         if (!$t['frozen_at'] || $t['phase']!=='open') throw new ApiError('只可调整已冻结、未结项的任务；结项后请先重新开放');
         if ($reason==='') throw new ApiError('调整当晚名册必须说明原因');
         if ((string)($data['roster_version'] ?? '')!==(string)$t['roster_version']) throw new ApiError('名册已变化，请重新核对', 'ROSTER_CONFLICT',409);
@@ -798,7 +950,8 @@ final class Domain
         $old=array_map(fn($r)=>(int)$r['student_id'],$before);
         foreach ($ids as $id) {
             $s=Support::one($this->db,'SELECT * FROM students WHERE id=? AND active=1',[$id]);
-            if (!$s) throw new ApiError('所选学生不在本班有效名册中');
+            if (!$s) throw new ApiError('所选学生不在有效名册中');
+            $this->scopedMember($s);
             $m=Support::one($this->db,'SELECT * FROM night_members WHERE task_id=? AND student_id=?',[$t['task_id'],$id]);
             if ($m && (int)$m['included']===1 && (int)$m['room_id']!==(int)$t['room_id']) throw new ApiError('该同学仍在另一寝室的当晚名册中，请先带理由从原寝移除，再加入目标寝室');
             if (!$m) {
@@ -825,6 +978,10 @@ final class Domain
             $d=Support::one($this->db,'SELECT * FROM drafts WHERE task_id=? AND room_id=? AND actor_id=?',[$t['task_id'],$t['room_id'],$u['id']]);
             if (!$d) return ['draft'=>null];
             $d['members']=json_decode($d['content_json'],true,512,JSON_THROW_ON_ERROR); unset($d['content_json']);
+            if ($this->scope!==null) {
+                $allowed=array_column($this->roomPayload($t)['members'],'student_id');
+                $d['members']=array_values(array_filter($d['members'],fn($m)=>in_array((int)($m['student_id'] ?? 0),$allowed,true)));
+            }
             $d['stale']=(int)$d['roster_version']!==(int)$t['roster_version']; return ['draft'=>$d];
         }
         if ($t['submitted_at'] || in_array($t['phase'],['closed','paused'],true)) throw new ApiError('已初报、结项或暂停的任务不能保存初报草稿');
@@ -907,18 +1064,15 @@ final class Domain
     public function seedDemo(): array
     {
         if (($this->config['env'] ?? '')!=='development') throw new ApiError('仅 development 环境允许虚构演示数据');
-        if ((int)Support::one($this->db,'SELECT COUNT(*) AS n FROM students')['n']>0 || (int)Support::one($this->db,'SELECT COUNT(*) AS n FROM users')['n']>0) throw new ApiError('演示初始化只允许空数据库，不能混入真实账号或名单');
+        if ((int)Support::one($this->db,'SELECT COUNT(*) AS n FROM students')['n']>0 || (int)Support::one($this->db,'SELECT COUNT(*) AS n FROM users')['n']>0) throw new ApiError('演示初始化只允许空数据库');
         $auth=new Auth($this->db,$this->config); $accounts=[];
-        foreach ([['00990001','虚构班长','admin'],['00990002','虚构团支书','committee'],['00990101','虚构寝室长甲','leader'],['00990201','虚构寝室长乙','leader']] as [$no,$name,$role]) $accounts[]=['student_no'=>$no,'name'=>$name,'role'=>$role]+$auth->createUser($no,$name,$role);
-        $u=['id'=>$accounts[0]['user_id'],'name'=>'虚构班长','role'=>'admin','reauth_until'=>time()+300];
-        $class=Schema::get($this->db,'class_name');
+        foreach ([['00990001','虚构管理员','admin'],['00990002','虚构班委','committee']] as [$no,$name,$role]) $accounts[]=['student_no'=>$no,'name'=>$name,'role'=>$role]+$auth->createUser($no,$name,$role);
+        $u=['id'=>$accounts[0]['user_id'],'name'=>'虚构管理员','role'=>'admin','reauth_until'=>time()+300];
+        $class=Support::one($this->db,'SELECT id,name FROM classes ORDER BY id LIMIT 1');
+        Support::exec($this->db,'INSERT INTO class_permissions (user_id,class_id,created_at) VALUES (?,?,?)',[$accounts[1]['user_id'],$class['id'],$this->now()]);
         $csv="班级,学号,姓名,楼栋,房间号,寝室长学号\n";
-        foreach ([['00990101','虚构寝室长甲','501','00990101'],['00990102','虚构同学甲','501','00990101'],['00990103','虚构同学乙','501','00990101'],['00990201','虚构寝室长乙','502','00990201'],['00990202','虚构同学丙','502','00990201'],['00990203','虚构同学丁','502','00990201']] as [$no,$name,$room,$leader]) $csv.="$class,$no,$name,示例楼,$room,$leader\n";
-        $this->importCommit($u,['csv'=>$csv,'hash'=>$this->previewHash($csv,$u['id']),'confirm'=>true]);
-        foreach (array_slice($accounts,2) as $account) {
-            $s=Support::one($this->db,'SELECT room_id FROM students WHERE student_no=?',[$account['student_no']]);
-            $this->grantSave($u,['user_id'=>$account['user_id'],'room_id'=>$s['room_id'],'valid_from'=>substr($this->now(),0,10)]);
-        }
-        return ['warning'=>'以下均为虚构账号；激活码只显示此次，不要公开传播。没有默认密码。','accounts'=>$accounts];
+        foreach ([['00990101','虚构负责人甲','501','00990101'],['00990102','虚构同学甲','501','00990101'],['00990103','虚构同学乙','501','00990101'],['00990201','虚构负责人乙','502','00990201'],['00990202','虚构同学丙','502','00990201']] as [$no,$name,$room,$leader]) $csv.=$class['name'].",$no,$name,示例楼,$room,$leader\n";
+        $this->importCommit($u,['class_id'=>$class['id'],'csv'=>$csv,'hash'=>$this->previewHash($csv,$u['id'],(int)$class['id']),'confirm'=>true]);
+        return ['warning'=>'以下均为虚构账号；激活码只显示此次。没有默认密码。','accounts'=>$accounts];
     }
 }

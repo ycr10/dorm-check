@@ -1,0 +1,301 @@
+{
+  "php": "8.5.10",
+  "sapi": "wasm",
+  "passed": 71,
+  "failed": 0,
+  "skipped": [
+    "Argon2id activation/login/reset: runtime has no Argon2id; no password algorithm downgrade or successful-login stub was used."
+  ],
+  "results": [
+    {
+      "name": "MySQL DDL generation quotes delayed (capture only, not a MySQL server test)",
+      "ok": true
+    },
+    {
+      "name": "schema installation is idempotent and identifiers keep zeroes",
+      "ok": true
+    },
+    {
+      "name": "GET reads do not create tasks or update the write lock",
+      "ok": true
+    },
+    {
+      "name": "CSV rejects duplicate identifiers, missing leaders, wrong class and changed preview",
+      "ok": true
+    },
+    {
+      "name": "server rejects early initial submission and ignores client clock or role",
+      "ok": true
+    },
+    {
+      "name": "initial batch is atomic for foreign members, duplicates and unreported values",
+      "ok": true
+    },
+    {
+      "name": "initial is complete, explicit and exactly-once on identical retries",
+      "ok": true
+    },
+    {
+      "name": "two authorized reporters cannot silently overwrite a version",
+      "ok": true
+    },
+    {
+      "name": "batch updates reject foreign members without partially saving",
+      "ok": true
+    },
+    {
+      "name": "class revocation applies to old sessions and cached request retries",
+      "ok": true
+    },
+    {
+      "name": "new class permissions allow followup on the original night",
+      "ok": true
+    },
+    {
+      "name": "cross-midnight returns preserve original night and human/receipt times",
+      "ok": true
+    },
+    {
+      "name": "late initial separates the check-time facts from current status",
+      "ok": true
+    },
+    {
+      "name": "late initial keeps independent current whereabouts and restores them from a private draft",
+      "ok": true
+    },
+    {
+      "name": "missing current whereabouts rejects the whole initial submission atomically",
+      "ok": true
+    },
+    {
+      "name": "reasoned corrections preserve original and current facts independently",
+      "ok": true
+    },
+    {
+      "name": "exempt is server-approved and safety contact does not imply present",
+      "ok": true
+    },
+    {
+      "name": "revoked exemption changes unresolved exempt state to unknown, preserving initial",
+      "ok": true
+    },
+    {
+      "name": "fixed report snapshots remain immutable while latest changes",
+      "ok": true
+    },
+    {
+      "name": "six-sheet export is real OOXML, identifiers/text are never formulas",
+      "ok": true
+    },
+    {
+      "name": "drafts are private, versioned and never count as submitted attendance",
+      "ok": true
+    },
+    {
+      "name": "frozen roster survives current-name changes and adjustment has its own version",
+      "ok": true
+    },
+    {
+      "name": "settings are validated atomically and do not rewrite frozen task times",
+      "ok": true
+    },
+    {
+      "name": "unresolved rooms cannot close; reopening preserves events and increases version",
+      "ok": true
+    },
+    {
+      "name": "nobody reporting still produces a complete due snapshot, once only",
+      "ok": true
+    },
+    {
+      "name": "missed days catch up with explicit actual timestamps and no duplicate reports",
+      "ok": true
+    },
+    {
+      "name": "safe and exempt arrival wording never claims everyone is physically present",
+      "ok": true
+    },
+    {
+      "name": "session passive polling expires, password-version changes revoke sessions",
+      "ok": true
+    },
+    {
+      "name": "login failure and token attempts are limited without disclosing existence",
+      "ok": true
+    },
+    {
+      "name": "RFC 6238 SHA1 vectors, replay protection and authenticated encryption",
+      "ok": true
+    },
+    {
+      "name": "backup restores data in maintenance and invalidates credentials, grants and sessions",
+      "ok": true
+    },
+    {
+      "name": "backup authentication rejects tampering before replacing business data",
+      "ok": true
+    },
+    {
+      "name": "retention cleanup is explicit and does not regenerate deleted nights",
+      "ok": true
+    },
+    {
+      "name": "freeze refreshes approved exemptions and responsible snapshots even with unchanged members",
+      "ok": true
+    },
+    {
+      "name": "submission freezes without cron but detects a stale roster before accepting",
+      "ok": true
+    },
+    {
+      "name": "post-initial roster additions can be amended without falsifying original unreported values",
+      "ok": true
+    },
+    {
+      "name": "transfers cannot overwrite original facts through a destination-room initial report",
+      "ok": true
+    },
+    {
+      "name": "task history rejects cross-room reads and includes the authorized member events",
+      "ok": true
+    },
+    {
+      "name": "disabled accounts and unauthorized class grants are rejected by authoritative database state",
+      "ok": true
+    },
+    {
+      "name": "real TOTP enrollment gates management and hashes every recovery code",
+      "ok": true
+    },
+    {
+      "name": "explicit retirement changes future membership, never frozen history or dependent leaders",
+      "ok": true
+    },
+    {
+      "name": "removing every member closes the empty scope without leaving phantom missing reports",
+      "ok": true
+    },
+    {
+      "name": "all-room closure and a later reopening update the nightly lifecycle",
+      "ok": true
+    },
+    {
+      "name": "unconfigured TOTP policy preserves legacy requirements without a migration",
+      "ok": true
+    },
+    {
+      "name": "exclusive TOTP preserves the selected secret and recovery codes while revoking other bindings and all sessions",
+      "ok": true
+    },
+    {
+      "name": "TOTP account changes reject unknown, inactive, empty and non-string student numbers atomically",
+      "ok": true
+    },
+    {
+      "name": "TOTP policy requires admin, recent verification, explicit confirmation and the current previous value",
+      "ok": true
+    },
+    {
+      "name": "saving the same TOTP account or ordinary settings does not revoke bindings or sessions again",
+      "ok": true
+    },
+    {
+      "name": "a designated committee account must enroll while others can work without TOTP",
+      "ok": true
+    },
+    {
+      "name": "pending enrollment cannot bypass a changed TOTP account policy",
+      "ok": true
+    },
+    {
+      "name": "failed TOTP confirmations retain rate limits after the enrollment transaction rolls back",
+      "ok": true
+    },
+    {
+      "name": "switching the designated TOTP account clears the former owner and requires the new owner to enroll",
+      "ok": true
+    },
+    {
+      "name": "selected-account recovery still requires reenrollment under the exclusive policy",
+      "ok": true
+    },
+    {
+      "name": "TOTP policy changes roll back the setting, credentials and session versions on database failure",
+      "ok": true
+    },
+    {
+      "name": "quick lookup uses the dorm roster without a login account and does not expose other rooms or private records",
+      "ok": true
+    },
+    {
+      "name": "quick initial is atomic, records unverified identity, and replays the same submission safely",
+      "ok": true
+    },
+    {
+      "name": "quick updates preserve initial facts, reject cross-room members, stale versions and forged task or time fields",
+      "ok": true
+    },
+    {
+      "name": "quick entry honors check time, frozen roster version, retirement and overnight date",
+      "ok": true
+    },
+    {
+      "name": "quick lookup limits repeated invalid requests without logging raw IP",
+      "ok": true
+    },
+    {
+      "name": "quick before 08:00 never creates a missing previous-night task",
+      "ok": true
+    },
+    {
+      "name": "quick entry freezes an existing previous-night task if scheduling was missed",
+      "ok": true
+    },
+    {
+      "name": "next day prepares the existing roster without a scheduled tick or another import",
+      "ok": true
+    },
+    {
+      "name": "preparing today cannot forge dates and preserves pauses, history and authorized access",
+      "ok": true
+    },
+    {
+      "name": "filing configuration is empty by default, public-only, validated and admin controlled",
+      "ok": true
+    },
+    {
+      "name": "business date changes at 08:00 for quick entry and authenticated default views",
+      "ok": true
+    },
+    {
+      "name": "morning lookup honors daytime check time without requiring yesterday",
+      "ok": true
+    },
+    {
+      "name": "default preparation before eight never invents a missing historical night",
+      "ok": true
+    },
+    {
+      "name": "date filters return only that day even when older tasks remain open",
+      "ok": true
+    },
+    {
+      "name": "scheduler still creates each calendar day independently of the 08:00 viewing cutoff",
+      "ok": true
+    },
+    {
+      "name": "business date handles year and leap-day boundaries without backfilling",
+      "ok": true
+    },
+    {
+      "name": "followups, inspections and snapshots use the same default date and explicit history stays separate",
+      "ok": true
+    }
+  ],
+  "lint": {
+    "linted": 15,
+    "php": "8.5.10",
+    "sapi": "wasm"
+  },
+  "scope": "Isolated direct-component SQLite tests in PHP WASM; not native CLI, Argon2id login, MySQL or production verification."
+}

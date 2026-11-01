@@ -18,3 +18,14 @@
 .filing-footer img{width:20px;height:20px;object-fit:contain;flex-shrink:0}
 .quick-entry-link{text-align:center;border-top:1px solid var(--line);padding-top:18px;margin-top:8px}
 .quick-entry-link p{margin:6px 0 0}
+
+/* Keep refresh and date actions aligned with the surrounding controls. */
+.sync-button{display:inline-flex;align-items:center;justify-content:center;gap:7px;min-height:40px;padding:8px 13px;border:1px solid var(--line);border-radius:10px;background:var(--surface);color:var(--text);font-size:12px;font-weight:550;white-space:nowrap}
+.sync-button svg{width:16px;height:16px}.sync-button:hover{background:var(--surface-hover)}.sync-button:focus-visible{outline:3px solid var(--blue);outline-offset:3px}
+.date-control{align-items:center;justify-content:flex-end;gap:8px}.date-control input{min-height:40px}.date-control .button{border-radius:10px;min-height:40px;white-space:nowrap}
+@media(max-width:520px){.date-control{justify-content:flex-start}.date-control label{flex-basis:100%}.date-control input{flex:1;min-width:0;max-width:none}.date-control .button{flex:none}.sync-button{padding:8px 10px}.sync-button svg{width:15px;height:15px}}
+@media(min-width:861px){.date-control{flex:0 0 auto;flex-wrap:nowrap}}
+@media(min-width:861px) and (max-width:1100px){.page-header{flex-wrap:wrap}}
+.page-controls{display:flex;align-items:flex-end;justify-content:flex-end;gap:12px;flex-wrap:wrap}.class-filter{display:flex;align-items:center;gap:8px;color:var(--muted);font-size:12px;white-space:nowrap}.class-filter select{width:auto;min-width:145px;min-height:40px;font-size:12px;border-radius:10px}
+@media(max-width:860px){.page-controls{width:100%;justify-content:flex-start}}
+@media(max-width:520px){.class-filter{width:100%}.class-filter span{width:64px}.class-filter select{flex:1;min-width:0}.page-controls{gap:12px}}

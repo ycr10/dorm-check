@@ -13,7 +13,7 @@ final class Auth
         if (empty($_SESSION['uid'])) return null;
         $now = time();
         $u = Support::one($this->db, 'SELECT * FROM users WHERE id=?', [$_SESSION['uid']]);
-        if (!$u || $u['status'] !== 'active' || (int)$u['auth_version'] !== (int)($_SESSION['auth_version'] ?? 0)
+        if (!$u || !in_array($u['role'], ['admin','committee'], true) || $u['status'] !== 'active' || (int)$u['auth_version'] !== (int)($_SESSION['auth_version'] ?? 0)
             || $now - (int)($_SESSION['issued_at'] ?? 0) >= $this->config['session_seconds']
             || $now - (int)($_SESSION['last_activity'] ?? 0) >= $this->config['idle_seconds']) {
             $this->clear(); return null;
@@ -36,7 +36,7 @@ final class Auth
     {
         $studentNo = Schema::get($db, 'totp_student_no');
         return [
-            'totp_required' => $studentNo === null ? $u['role'] !== 'leader' : $u['student_no'] === $studentNo,
+            'totp_required' => $studentNo === null ? true : $u['student_no'] === $studentNo,
             'totp_allowed' => $studentNo === null || $u['student_no'] === $studentNo,
         ];
     }
@@ -114,7 +114,7 @@ final class Auth
     }
     public function handle(string $action, array $data): array
     {
-        if ($action === 'session') return ['user' => $this->current(), 'server_time' => Support::now(), 'config' => ['class_name'=>Schema::get($this->db,'class_name',$this->config['class_name']),'check_time'=>Schema::get($this->db,'check_time','22:30'),'timezone'=>'Asia/Shanghai','environment'=>$this->config['env']]];
+        if ($action === 'session') return ['user' => $this->current(), 'server_time' => Support::now(), 'config' => ['class_name'=>Schema::get($this->db,'grade_name','全年级'),'check_time'=>Schema::get($this->db,'check_time','22:30'),'timezone'=>'Asia/Shanghai','environment'=>$this->config['env']]];
         if ($action === 'login') {
             $no = Support::text($data['student_no'] ?? '',64); $password = (string)($data['password'] ?? '');
             if (strlen($password) > 512) throw new ApiError('学号或密码不正确','LOGIN_FAILED',401);
@@ -124,7 +124,7 @@ final class Auth
             // Run a real password verifier even for unknown IDs, reducing account-enumeration timing differences.
             $dummy = '$argon2id$v=19$m=19456,t=2,p=1$Tm9uZXhpc3RlbnRVc2VyMQ$g9VDc4E4J2wmwGh1Mtn3k2WGRJGi3vA11fGPGzTZV64';
             $valid = password_verify($password, $u['password_hash'] ?? $dummy);
-            if (!$u || $u['status'] !== 'active' || !$valid) {
+            if (!$u || !in_array($u['role'],['admin','committee'],true) || $u['status'] !== 'active' || !$valid) {
                 $this->fail($label); $this->fail($ipLabel,100,900);
                 Audit::write($this->db,null,'auth.login_failed',['account_tag'=>substr(hash('sha256',$no),0,16)]);
                 throw new ApiError('学号或密码不正确','LOGIN_FAILED',401);
@@ -149,7 +149,7 @@ final class Auth
             $u=Support::one($this->db,'SELECT * FROM users WHERE student_no=?',[$no]);
             $type=$action==='activate'?'activate':'reset';
             $token=$u?Support::one($this->db,'SELECT * FROM auth_tokens WHERE user_id=? AND token_hash=? AND token_type=? AND used_at IS NULL AND expires_at>?',[$u['id'],$this->tokenHash($code),$type,time()]):null;
-            if (!$u || !$token || $u['status']==='disabled') { $this->fail($label); throw new ApiError('学号或一次性凭据无效、已使用或已过期','TOKEN_INVALID',422); }
+            if (!$u || !$token || !in_array($u['role'],['admin','committee'],true) || $u['status']==='disabled') { $this->fail($label); throw new ApiError('学号或一次性凭据无效、已使用或已过期','TOKEN_INVALID',422); }
             $hash=Security::password((string)($data['password']??''),$no);
             $this->db->beginTransaction();
             try {
@@ -216,17 +216,24 @@ final class Auth
     }
     public function createUser(string $studentNo,string $name,string $role,?int $actor=null): array
     {
-        if(!preg_match('/^[A-Za-z0-9_-]{3,64}$/D',$studentNo)||$name===''||!in_array($role,['leader','committee','admin'],true))throw new ApiError('请填写正确的学号、姓名和角色');
-        if(Support::one($this->db,'SELECT id FROM users WHERE student_no=?',[$studentNo]))throw new ApiError('此学号已经建立账号','DUPLICATE_ACCOUNT',409);
-        Support::exec($this->db,'INSERT INTO users (student_no,name,role,status,created_at,updated_at) VALUES (?,?,?,?,?,?)',[$studentNo,Support::text($name,100),$role,'pending',Support::now(),Support::now()]);
-        $id=(int)$this->db->lastInsertId(); $token=$this->issueToken($id,'activate',$actor);
+        if(!preg_match('/^[A-Za-z0-9_-]{3,64}$/D',$studentNo)||$name===''||!in_array($role,['committee','admin'],true))throw new ApiError('请填写正确的学号、姓名和角色');
+        $existing=Support::one($this->db,'SELECT id,role FROM users WHERE student_no=?',[$studentNo]);
+        if($existing && $existing['role']!=='retired')throw new ApiError('此学号已经建立账号','DUPLICATE_ACCOUNT',409);
+        if($existing) {
+            $id=(int)$existing['id'];
+            Support::exec($this->db,"UPDATE users SET name=?,role=?,status='pending',updated_at=? WHERE id=?",[Support::text($name,100),$role,Support::now(),$id]);
+        } else {
+            Support::exec($this->db,'INSERT INTO users (student_no,name,role,status,created_at,updated_at) VALUES (?,?,?,?,?,?)',[$studentNo,Support::text($name,100),$role,'pending',Support::now(),Support::now()]);
+            $id=(int)$this->db->lastInsertId();
+        }
+        $token=$this->issueToken($id,'activate',$actor);
         Audit::write($this->db,$actor,'users.create',['user_id'=>$id,'role'=>$role]);
         return ['user_id'=>$id,'activation_code'=>$token['code'],'expires_at'=>$token['expires_at']];
     }
     public function issueToken(int $userId,string $type,?int $actor=null): array
     {
-        $u=Support::one($this->db,'SELECT id,status FROM users WHERE id=?',[$userId]);
-        if(!$u||$u['status']==='disabled')throw new ApiError('账号不存在或已停用');
+        $u=Support::one($this->db,'SELECT id,status,role FROM users WHERE id=?',[$userId]);
+        if(!$u||$u['status']==='disabled'||!in_array($u['role'],['admin','committee'],true))throw new ApiError('账号不存在或已停用');
         $code=bin2hex(random_bytes(16)); $expires=time()+($type==='activate'?86400:1800);
         $this->db->beginTransaction();
         try {
@@ -241,15 +248,15 @@ final class Auth
     {
         if($u['role']!=='admin')throw new ApiError('此操作需要系统管理权限','FORBIDDEN',403);
         $this->requireRecent($u);
-        if($action==='users.list')return ['users'=>Support::all($this->db,'SELECT id,student_no,name,role,status,totp_enabled,created_at FROM users ORDER BY id')];
-        if($action==='user_create')return $this->createUser(Support::text($data['student_no']??'',64),Support::text($data['name']??'',100),Support::text($data['role']??'leader',20),$u['id']);
+        if($action==='users.list')return ['users'=>Support::all($this->db,"SELECT id,student_no,name,role,status,totp_enabled,created_at FROM users WHERE role IN ('admin','committee') ORDER BY id")];
+        if($action==='user_create')return $this->createUser(Support::text($data['student_no']??'',64),Support::text($data['name']??'',100),Support::text($data['role']??'committee',20),$u['id']);
         $id=(int)($data['user_id']??0);
         if($action==='user_reset') { $t=$this->issueToken($id,'reset',$u['id']); return ['reset_code'=>$t['code'],'expires_at'=>$t['expires_at']]; }
         if($action==='user_status') {
             if($id===$u['id'])throw new ApiError('不能通过此入口停用自己');
             $status=$data['status']??''; if(!in_array($status,['disabled','active'],true))throw new ApiError('状态无效');
             $target=Support::one($this->db,'SELECT * FROM users WHERE id=?',[$id]);
-            if(!$target)throw new ApiError('账号不存在','NOT_FOUND',404);
+            if(!$target || !in_array($target['role'],['admin','committee'],true))throw new ApiError('账号不存在','NOT_FOUND',404);
             if($status==='active'&&!$target['password_hash'])throw new ApiError('请先发放激活或恢复凭据');
             Support::exec($this->db,'UPDATE users SET status=?,auth_version=auth_version+1,updated_at=? WHERE id=?',[$status,Support::now(),$id]);
             Support::exec($this->db,'UPDATE auth_tokens SET used_at=? WHERE user_id=? AND used_at IS NULL',[time(),$id]);

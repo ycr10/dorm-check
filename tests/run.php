@@ -12,7 +12,7 @@ use DormCheck\Schema;
 use DormCheck\Security;
 use DormCheck\Support;
 
-foreach (['Core','Schema','Auth','Xlsx','Reports','Domain','Backup'] as $file) require_once dirname(__DIR__).'/src/'.$file.'.php';
+foreach (['Core','Schema','Grade','Auth','Xlsx','Reports','Domain','Backup'] as $file) require_once dirname(__DIR__).'/src/'.$file.'.php';
 date_default_timezone_set('Asia/Shanghai');
 
 final class FrozenClock implements Clock
@@ -44,6 +44,8 @@ final class Fixture
     public array $b;
     public string $directory;
     public string $csv;
+    public int $classA;
+    public int $classB;
     public function __construct()
     {
         $this->directory=sys_get_temp_dir().'/dorm-test-'.bin2hex(random_bytes(8)); mkdir($this->directory,0700,true);
@@ -52,27 +54,49 @@ final class Fixture
         $this->db=Database::connect($this->config); $this->domain=new Domain($this->db,$this->config); $this->domain->install();
         $auth=new Auth($this->db,$this->config);
         $users=[];
-        foreach ([['00990000','虚构管理员','admin'],['00990001','虚构班委','committee'],['00100001','虚构寝室长甲','leader'],['00100003','虚构寝室长乙','leader']] as [$no,$name,$role]) {
+        foreach ([['00990000','虚构管理员','admin'],['00990001','虚构年级班委','committee'],['00100001','虚构甲班委','committee'],['00100003','虚构乙班委','committee']] as [$no,$name,$role]) {
             $created=$auth->createUser($no,$name,$role);
-            Support::exec($this->db,"UPDATE users SET status='active',totp_enabled=? WHERE id=?",[$role==='leader'?0:1,$created['user_id']]);
+            Support::exec($this->db,"UPDATE users SET status='active',totp_enabled=1 WHERE id=?",[$created['user_id']]);
             $users[]=['id'=>$created['user_id'],'name'=>$name,'student_no'=>$no,'role'=>$role,'reauth_until'=>time()+300];
         }
         [$this->admin,$this->committee,$this->a,$this->b]=$users;
+        $this->classA=(int)Support::one($this->db,'SELECT id FROM classes WHERE name=?',['测试班'])['id'];
+        $this->classB=(int)$this->call('class_create',['name'=>'测试乙班'])['class']['id'];
+        $this->call('class_permissions_save',['user_id'=>$this->committee['id'],'class_ids'=>[$this->classA,$this->classB]]);
+        $this->call('class_permissions_save',['user_id'=>$this->a['id'],'class_ids'=>[$this->classA]]);
+        $this->call('class_permissions_save',['user_id'=>$this->b['id'],'class_ids'=>[$this->classB]]);
         $this->csv=$this->makeCsv([['00100001','虚构寝室长甲','001','00100001'],['00100002','=1+1','001','00100001'],['00100003','虚构寝室长乙','002','00100003'],['00100004','虚构同学丁','002','00100003']]);
         $this->import($this->csv);
-        foreach ([$this->a,$this->b] as $u) {
-            $s=Support::one($this->db,'SELECT room_id FROM students WHERE student_no=?',[$u['student_no']]);
-            $this->call('grant_save',['user_id'=>$u['id'],'room_id'=>$s['room_id'],'valid_from'=>'2026-10-29']);
-        }
     }
     public function makeCsv(array $rows): string
     {
         $s=fopen('php://temp','w+'); fputcsv($s,['班级','学号','姓名','楼栋','房间号','寝室长学号'],',','"','');
-        foreach ($rows as [$no,$name,$room,$leader]) fputcsv($s,['测试班',$no,$name,'甲楼',$room,$leader],',','"','');
+        foreach ($rows as [$no,$name,$room,$leader]) {
+            $class=in_array($no,['00100003','00100004'],true)?'测试乙班':'测试班';
+            fputcsv($s,[$class,$no,$name,'甲楼',$room,$leader],',','"','');
+        }
         rewind($s); $csv=stream_get_contents($s); fclose($s); return $csv;
     }
-    public function call(string $action, array $data=[], ?array $user=null): array { return $this->domain->handle($action,$user ?? $this->admin,$data); }
-    public function import(string $csv): array { $p=$this->call('import_preview',['csv'=>$csv]); if ($p['errors']) throw new RuntimeException(Support::json($p['errors'])); return $this->call('import_commit',['csv'=>$csv,'hash'=>$p['hash'],'confirm'=>true]); }
+    public function call(string $action, array $data=[], ?array $user=null): array
+    {
+        if (in_array($action,['import_preview','import_commit'],true) && !isset($data['class_id'])) $data['class_id']=$this->classA;
+        return $this->domain->handle($action,$user ?? $this->admin,$data);
+    }
+    public function import(string $csv): array
+    {
+        $source=fopen('php://temp','w+'); fwrite($source,$csv); rewind($source); $header=fgetcsv($source,0,',','"',''); $files=[];
+        while (($row=fgetcsv($source,0,',','"',''))!==false) {
+            $class=$row[0] ?? ''; if (!isset($files[$class])) { $files[$class]=fopen('php://temp','w+'); fputcsv($files[$class],$header,',','"',''); }
+            fputcsv($files[$class],$row,',','"','');
+        }
+        fclose($source); $result=[];
+        foreach ($files as $name=>$stream) {
+            rewind($stream); $part=stream_get_contents($stream); fclose($stream); $classId=$name==='测试乙班'?$this->classB:$this->classA;
+            $p=$this->call('import_preview',['class_id'=>$classId,'csv'=>$part]); if ($p['errors']) throw new RuntimeException(Support::json($p['errors']));
+            $result=$this->call('import_commit',['class_id'=>$classId,'csv'=>$part,'hash'=>$p['hash'],'confirm'=>true]);
+        }
+        return $result;
+    }
     public function open(string $time='2026-10-29 22:30:00'): void { $this->clock->value=$time; $this->domain->tick(); }
     public function task(?array $user=null, string $date='2026-10-29'): array { return $this->call('tasks',['date'=>$date],$user ?? $this->a)['tasks'][0]; }
     public function payload(array $task, string $status='present'): array
@@ -143,7 +167,7 @@ test('CSV rejects duplicate identifiers, missing leaders, wrong class and change
 });
 test('server rejects early initial submission and ignores client clock or role',function (Fixture $f): void {
     $p=$f->payload($f->task()); $p['now']='2026-10-29 23:30:00'; rejects(fn()=> $f->call('report_initial',$p,$f->a),'TASK_NOT_OPEN');
-    $fake=$f->a; $fake['role']='admin'; rejects(fn()=> $f->call('roster',[],$fake),'FORBIDDEN');
+    $fake=$f->a; $fake['role']='admin'; $visible=$f->call('roster',[],$fake)['students']; same(count($visible),2); check(!in_array('00100003',array_column($visible,'student_no'),true),'forged role expanded class access');
     same($f->report()['metrics']['unreported'],4);
 });
 test('initial batch is atomic for foreign members, duplicates and unreported values',function (Fixture $f): void {
@@ -158,24 +182,26 @@ test('initial is complete, explicit and exactly-once on identical retries',funct
 });
 test('two authorized reporters cannot silently overwrite a version',function (Fixture $f): void {
     $f->open(); $first=$f->submit('away'); $second=$first;
-    $f->call('grant_save',['user_id'=>$f->b['id'],'room_id'=>$first['room_id'],'valid_from'=>'2026-10-29']);
+    $f->call('class_permissions_save',['user_id'=>$f->b['id'],'class_ids'=>[$f->classA,$f->classB]]);
     $f->update($first,[$first['members'][0]['student_id']]); rejects(fn()=> $f->update($second,[$second['members'][1]['student_id']],'present',[],$f->b),'VERSION_CONFLICT');
     same($f->report()['metrics']['away'],1);
 });
 test('batch updates reject foreign members without partially saving',function (Fixture $f): void {
     $f->open(); $t=$f->submit('away'); rejects(fn()=> $f->update($t,[$t['members'][0]['student_id'],$f->task($f->b)['members'][0]['student_id']]),'FORBIDDEN'); same($f->report()['metrics']['away'],2);
 });
-test('revocation and expiry apply to old sessions and cached request retries',function (Fixture $f): void {
+test('class revocation applies to old sessions and cached request retries',function (Fixture $f): void {
     $f->open(); $p=$f->payload($f->task()); $f->call('report_initial',$p,$f->a);
-    $grant=Support::one($f->db,'SELECT id FROM grants WHERE user_id=?',[$f->a['id']]); $f->call('grant_revoke',['grant_id'=>$grant['id']]);
+    $f->call('class_permissions_save',['user_id'=>$f->a['id'],'class_ids'=>[]]);
     same($f->call('tasks',[],$f->a)['tasks'],[]); rejects(fn()=> $f->call('report_initial',$p,$f->a),'FORBIDDEN');
-    $f->call('grant_save',['user_id'=>$f->a['id'],'room_id'=>$f->task($f->b)['room_id'],'valid_from'=>'2026-10-29','valid_to'=>'2026-10-29']); $f->clock->value='2026-10-30 00:00:00'; same($f->call('tasks',['date'=>'2026-10-29'],$f->a)['tasks'],[]);
+    $f->call('class_permissions_save',['user_id'=>$f->a['id'],'class_ids'=>[$f->classB]]); $f->clock->value='2026-10-30 00:00:00';
+    rejects(fn()=> $f->call('report_initial',$p,$f->a),'FORBIDDEN'); same(count($f->call('tasks',['date'=>'2026-10-29'],$f->a)['tasks']),1);
 });
-test('handoff to old open task must be explicit',function (Fixture $f): void {
-    $f->open(); $t=$f->submit('away'); $old=Support::one($f->db,'SELECT id FROM grants WHERE user_id=?',[$f->a['id']]); $f->call('grant_revoke',['grant_id'=>$old['id']]);
-    $f->clock->value='2026-10-30 00:20:00'; $f->call('grant_save',['user_id'=>$f->b['id'],'room_id'=>$t['room_id'],'valid_from'=>'2026-10-30']);
+test('new class permissions allow followup on the original night',function (Fixture $f): void {
+    $f->open(); $t=$f->submit('away'); $f->call('class_permissions_save',['user_id'=>$f->a['id'],'class_ids'=>[]]);
+    $f->clock->value='2026-10-30 00:20:00';
     rejects(fn()=> $f->update($t,[$t['members'][0]['student_id']],'present',[],$f->b),'FORBIDDEN');
-    $f->call('grant_save',['user_id'=>$f->b['id'],'room_id'=>$t['room_id'],'valid_from'=>'2026-10-30','task_id'=>$t['id']]); $changed=$f->update($t,[$t['members'][0]['student_id']],'present',[],$f->b); same($changed['members'][0]['initial_status'],'away');
+    $f->call('class_permissions_save',['user_id'=>$f->b['id'],'class_ids'=>[$f->classA,$f->classB]]);
+    $changed=$f->update($t,[$t['members'][0]['student_id']],'present',[],$f->b); same($changed['members'][0]['initial_status'],'away');
 });
 test('cross-midnight returns preserve original night and human/receipt times',function (Fixture $f): void {
     $f->open(); $t=$f->submit('away'); $f->clock->value='2026-10-30 00:20:00'; $t=$f->update($t,[$t['members'][0]['student_id']],'present',['occurred_at'=>'2026-10-30 00:10:00']);
@@ -203,13 +229,13 @@ test('missing current whereabouts rejects the whole initial submission atomicall
 });
 test('reasoned corrections preserve original and current facts independently',function (Fixture $f): void {
     $f->open(); $t=$f->submit('away'); $base=['task_id'=>$t['id'],'student_id'=>$t['members'][0]['student_id'],'status'=>'present','reason'=>'核实原申报误填','target'=>'initial','version'=>$t['report_version'],'idempotency_key'=>bin2hex(random_bytes(12))];
-    rejects(fn()=> $f->call('report_correct',$base,$f->a),'FORBIDDEN'); $t=$f->call('report_correct',$base)['task']; same($t['members'][0]['initial_status'],'away'); same($t['members'][0]['corrected_initial_status'],'present'); same($t['members'][0]['current_status'],'away');
+    rejects(fn()=> $f->call('report_correct',$base,$f->b),'FORBIDDEN'); $t=$f->call('report_correct',$base)['task']; same($t['members'][0]['initial_status'],'away'); same($t['members'][0]['corrected_initial_status'],'present'); same($t['members'][0]['current_status'],'away');
     $base['reason']=''; $base['version']=$t['report_version']; $base['idempotency_key']=bin2hex(random_bytes(12)); rejects(fn()=> $f->call('report_correct',$base));
 });
 test('exempt is server-approved and safety contact does not imply present',function (Fixture $f): void {
     $f->open(); $p=$f->payload($f->task(),'exempt'); rejects(fn()=> $f->call('report_initial',$p,$f->a));
     $t=$f->submit('away'); $id=$t['members'][0]['student_id']; $f->call('followup_save',['task_id'=>$t['id'],'student_id'=>$id,'state'=>'safe','note'=>'电话确认安全但仍未回寝']); same($f->report()['metrics']['away'],2);
-    rejects(fn()=> $f->call('exemption_save',['student_id'=>$id,'start_date'=>'2026-10-29','end_date'=>'2026-10-29','source'=>'核实许可','approved'=>true],$f->a),'FORBIDDEN');
+    rejects(fn()=> $f->call('exemption_save',['student_id'=>$id,'start_date'=>'2026-10-29','end_date'=>'2026-10-29','source'=>'核实许可','approved'=>true],$f->b),'FORBIDDEN');
 });
 test('revoked exemption changes unresolved exempt state to unknown, preserving initial',function (Fixture $f): void {
     $f->open(); $t=$f->task(); $grants=[];
@@ -227,7 +253,8 @@ test('six-sheet export is real OOXML, identifiers/text are never formulas',funct
     $workbook=$zip->getFromName('xl/workbook.xml'); same(substr_count($workbook,'<sheet '),6); check(str_contains($workbook,'补报与更正记录'),'missing sixth sheet');
     $detail=$zip->getFromName('xl/worksheets/sheet2.xml'); check(str_contains($detail,'00100001'),'leading zeros lost'); check(str_contains($detail,'=1+1'),'text fixture missing'); check(!preg_match('/<f(?:\s|>)/',$detail),'formula cells emitted');
     for ($i=1;$i<=6;$i++) check(simplexml_load_string($zip->getFromName('xl/worksheets/sheet'.$i.'.xml'))!==false,'invalid worksheet XML'); $zip->close();
-    $u=$f->admin; $u['reauth_until']=time()-1; rejects(fn()=> $f->call('export',['date'=>'2026-10-29'],$u),'REAUTH_REQUIRED'); rejects(fn()=> $f->call('export',['date'=>'2026-10-29'],$f->a),'FORBIDDEN');
+    $u=$f->admin; $u['reauth_until']=time()-1; rejects(fn()=> $f->call('export',['date'=>'2026-10-29'],$u),'REAUTH_REQUIRED');
+    $own=$f->call('export',['date'=>'2026-10-29'],$f->a); $zip=new ZipArchive(); same($zip->open($own['download_path']),true); $detail=$zip->getFromName('xl/worksheets/sheet2.xml'); check(str_contains($detail,'00100001'),'own class omitted'); check(!str_contains($detail,'00100003'),'other class leaked'); $zip->close();
 });
 test('drafts are private, versioned and never count as submitted attendance',function (Fixture $f): void {
     $t=$f->task(); $p=$f->payload($t,'away'); $f->call('draft_save',['task_id'=>$t['id'],'roster_version'=>$t['roster_version'],'members'=>$p['members']],$f->a);
@@ -298,7 +325,7 @@ test('retention cleanup is explicit and does not regenerate deleted nights',func
 test('freeze refreshes approved exemptions and responsible snapshots even with unchanged members',function (Fixture $f): void {
     $t=$f->task(); $f->clock->value='2026-10-29 22:25:00'; $id=$t['members'][0]['student_id'];
     $f->call('exemption_save',['student_id'=>$id,'start_date'=>'2026-10-29','end_date'=>'2026-10-29','source'=>'冻结前核实许可','approved'=>true]); $f->open(); $t=$f->task();
-    same(count($t['responsible']),1); check($t['members'][0]['frozen_exemption']!==null,'pre-freeze exemption missing'); same($t['members'][0]['frozen_exemption']['source'],'冻结前核实许可');
+    same(count($t['responsible']),0); check($t['members'][0]['frozen_exemption']!==null,'pre-freeze exemption missing'); same($t['members'][0]['frozen_exemption']['source'],'冻结前核实许可');
 });
 test('submission freezes without cron but detects a stale roster before accepting',function (Fixture $f): void {
     $old=$f->task(); $f->clock->value='2026-10-29 22:29:00'; $csv=$f->makeCsv([['00100005','虚构补录同学','001','00100001']]); $f->import($csv); $f->clock->value='2026-10-29 22:31:00';
@@ -314,20 +341,22 @@ test('transfers cannot overwrite original facts through a destination-room initi
     $f->open(); $a=$f->submit('away'); $b=$f->task($f->b); $moved=$a['members'][1];
     $f->call('task_roster_adjust',['task_id'=>$a['id'],'roster_version'=>$a['roster_version'],'student_ids'=>[$a['members'][0]['student_id']],'reason'=>'核实本晚换寝，先移出原寝']);
     $b=$f->call('task_roster_adjust',['task_id'=>$b['id'],'roster_version'=>$b['roster_version'],'student_ids'=>array_merge(array_column($b['members'],'student_id'),[$moved['student_id']]),'reason'=>'核实本晚换寝，加入目标寝'])['task'];
-    $bad=$f->payload($b); rejects(fn()=> $f->call('report_initial',$bad,$f->b),'INITIAL_IMMUTABLE');
-    $payload=$f->payload($b,'away'); $b=$f->call('report_initial',$payload,$f->b)['task'];
+    $bad=$f->payload($b); rejects(fn()=> $f->call('report_initial',$bad),'INITIAL_IMMUTABLE');
+    $payload=$f->payload($b,'away'); $b=$f->call('report_initial',$payload)['task'];
     $m=array_values(array_filter($b['members'],fn($m)=>$m['student_id']===$moved['student_id']))[0]; same($m['initial_status'],'away');
     same((int)Support::one($f->db,"SELECT COUNT(*) AS n FROM attendance_events WHERE student_id=? AND type='initial'",[$moved['student_id']])['n'],1);
-    $history=$f->call('task_history',['task_id'=>$b['id']],$f->b)['events'];
+    $history=$f->call('task_history',['task_id'=>$b['id']])['events'];
     check(count(array_filter($history,fn($e)=>(int)$e['student_id']===$moved['student_id'] && $e['type']==='initial' && $e['room']==='甲楼 · 001'))===1,'transferred original history missing');
     check(count(array_filter($history,fn($e)=>(int)$e['student_id']===$a['members'][0]['student_id']))===0,'history leaked unrelated original-room member');
+    $scoped=$f->call('task_history',['task_id'=>$b['id']],$f->b)['events'];
+    check(count(array_filter($scoped,fn($e)=>(int)$e['student_id']===$moved['student_id']))===0,'other class history leaked');
 });
 test('task history rejects cross-room reads and includes the authorized member events',function (Fixture $f): void {
     $f->open(); $t=$f->submit('away'); $f->update($t,[$t['members'][0]['student_id']]); $history=$f->call('task_history',['task_id'=>$t['id']],$f->a); same(count($history['events']),3);
     rejects(fn()=> $f->call('task_history',['task_id'=>$t['id']],$f->b),'FORBIDDEN');
 });
-test('disabled accounts and privilege-bearing grants are rejected by authoritative database state',function (Fixture $f): void {
-    rejects(fn()=> $f->call('grant_save',['user_id'=>$f->admin['id'],'room_id'=>$f->task()['room_id'],'valid_from'=>'2026-10-29'],$f->committee));
+test('disabled accounts and unauthorized class grants are rejected by authoritative database state',function (Fixture $f): void {
+    rejects(fn()=> $f->call('class_permissions_save',['user_id'=>$f->a['id'],'class_ids'=>[$f->classB]],$f->committee),'FORBIDDEN');
     Support::exec($f->db,"UPDATE users SET status='disabled' WHERE id=?",[$f->a['id']]); rejects(fn()=> $f->call('tasks',[],$f->a),'UNAUTHENTICATED');
 });
 test('real TOTP enrollment gates management and hashes every recovery code',function (Fixture $f): void {
@@ -383,12 +412,12 @@ test('exclusive TOTP preserves the selected secret and recovery codes while revo
     $audit=Support::one($f->db,"SELECT detail_json FROM audit_logs WHERE action='settings.totp_account'"); check($audit!==null,'TOTP policy audit missing'); check(!str_contains($audit['detail_json'],$secret),'audit leaked secret');
 });
 test('TOTP account changes reject unknown, inactive, empty and non-string student numbers atomically',function (Fixture $f): void {
-    $auth=new Auth($f->db,$f->config); $pending=$auth->createUser('00888888','虚构未激活账号','leader');
+    $auth=new Auth($f->db,$f->config); $pending=$auth->createUser('00888888','虚构未激活账号','committee');
     Support::exec($f->db,"UPDATE users SET status='disabled' WHERE id=?",[$f->b['id']]);
     $before=Support::all($f->db,'SELECT id,auth_version,totp_enabled FROM users ORDER BY id');
     foreach (['00999999','',null,990000,[],'00888888',$f->b['student_no']] as $value) {
-        $data=totpSettingsPayload($f,$value); $data['settings']['class_name']='不应保存'; rejects(fn()=> $f->call('settings_save',$data));
-        same(Schema::get($f->db,'totp_student_no'),null); same(Schema::get($f->db,'class_name'),'测试班'); same(Support::all($f->db,'SELECT id,auth_version,totp_enabled FROM users ORDER BY id'),$before);
+        $data=totpSettingsPayload($f,$value); $data['settings']['grade_name']='不应保存'; rejects(fn()=> $f->call('settings_save',$data));
+        same(Schema::get($f->db,'totp_student_no'),null); same(Schema::get($f->db,'grade_name'),null); same(Support::all($f->db,'SELECT id,auth_version,totp_enabled FROM users ORDER BY id'),$before);
     }
 });
 test('TOTP policy requires admin, recent verification, explicit confirmation and the current previous value',function (Fixture $f): void {
@@ -407,7 +436,8 @@ test('saving the same TOTP account or ordinary settings does not revoke bindings
     same($f->call('settings_save',['settings'=>['retention_days'=>201]])['relogin_required'],false);
     same(Support::all($f->db,'SELECT id,auth_version FROM users ORDER BY id'),$before); same(Schema::get($f->db,'totp_student_no'),$f->admin['student_no']);
 });
-test('a designated leader must enroll while non-designated managers can work without TOTP',function (Fixture $f): void {
+test('a designated committee account must enroll while others can work without TOTP',function (Fixture $f): void {
+    Support::exec($f->db,'UPDATE users SET totp_enabled=0 WHERE id=?',[$f->a['id']]);
     $f->call('settings_save',totpSettingsPayload($f,$f->a['student_no'])); $auth=new Auth($f->db,$f->config);
     fixtureSession($f,$f->a); same($auth->current()['totp_required'],true); rejects(fn()=> $auth->requireUser(),'MFA_SETUP_REQUIRED'); rejects(fn()=> $f->call('tasks',[],$f->a),'MFA_SETUP_REQUIRED');
     $setup=$auth->handle('totp_setup',[]); $bound=$auth->handle('totp_confirm',['code'=>Security::totp($setup['secret'],time())]); same(count($bound['recovery_codes']),8); same($auth->requireUser()['totp_enabled'],true); same(count($f->call('tasks',[],$f->a)['tasks']),1);
@@ -417,6 +447,7 @@ test('a designated leader must enroll while non-designated managers can work wit
     }
 });
 test('pending enrollment cannot bypass a changed TOTP account policy',function (Fixture $f): void {
+    Support::exec($f->db,'UPDATE users SET totp_enabled=0 WHERE id=?',[$f->a['id']]);
     $auth=new Auth($f->db,$f->config); fixtureSession($f,$f->a); $setup=$auth->handle('totp_setup',[]); $oldSession=$_SESSION;
     $f->call('settings_save',totpSettingsPayload($f,$f->admin['student_no'])); $_SESSION=$oldSession;
     rejects(fn()=> $auth->handle('totp_confirm',['code'=>Security::totp($setup['secret'],time())]),'UNAUTHENTICATED');
@@ -436,6 +467,7 @@ test('switching the designated TOTP account clears the former owner and requires
     $setup=$auth->handle('totp_setup',[]); $auth->handle('totp_confirm',['code'=>Security::totp($setup['secret'],time())]); same($auth->requireUser()['totp_enabled'],true);
 });
 test('selected-account recovery still requires reenrollment under the exclusive policy',function (Fixture $f): void {
+    Support::exec($f->db,'UPDATE users SET totp_enabled=0 WHERE id=?',[$f->a['id']]);
     $f->call('settings_save',totpSettingsPayload($f,$f->a['student_no'])); fixtureSession($f,$f->a); $auth=new Auth($f->db,$f->config);
     $setup=$auth->handle('totp_setup',[]); $bound=$auth->handle('totp_confirm',['code'=>Security::totp($setup['secret'],time())]); $raw=Support::one($f->db,'SELECT * FROM users WHERE id=?',[$f->a['id']]);
     $recover=new ReflectionMethod(Auth::class,'recoveryFactor'); same($recover->invoke($auth,$raw,$bound['recovery_codes'][0]),true); same($recover->invoke($auth,$raw,$bound['recovery_codes'][0]),false); same($auth->current(),null);
@@ -636,7 +668,7 @@ if (defined('PASSWORD_ARGON2ID') && in_array('argon2id',password_algos(),true)) 
         same($other['user']['totp_required'],false); same($other['user']['totp_enabled'],false); check($other['user']['reauth_until']>time(),'password-only manager login lacks recent verification');
     });
     test('real Argon2id activation, login, reset and single-use credentials',function (Fixture $f): void {
-        $auth=new Auth($f->db,$f->config); $new=$auth->createUser('00888888','虚构待激活人','leader'); $_SESSION=[];
+        $auth=new Auth($f->db,$f->config); $new=$auth->createUser('00888888','虚构待激活人','committee'); $_SESSION=[];
         $password='A synthetic private passphrase 2026!'; $auth->handle('activate',['student_no'=>'00888888','code'=>$new['activation_code'],'password'=>$password]);
         rejects(fn()=> $auth->handle('activate',['student_no'=>'00888888','code'=>$new['activation_code'],'password'=>$password]),'TOKEN_INVALID');
         $logged=$auth->handle('login',['student_no'=>'00888888','password'=>$password]); same($logged['user']['student_no'],'00888888'); check($auth->current()!==null,'login session missing');

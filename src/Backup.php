@@ -9,7 +9,7 @@ final class Backup
     private const MAGIC = "DORMBACKUP2\n";
     private const CHUNK = 1048576;
     private const LIMIT = 536870912;
-    private const TABLES = ['users','auth_tokens','recovery_codes','rate_limits','audit_logs','app_lock','settings','rooms','students','placements','grants','exemptions','night_tasks','room_tasks','night_members','attendance_events','request_keys','followups','inspections','daily_reports','drafts','job_runs'];
+    private const TABLES = ['users','auth_tokens','recovery_codes','rate_limits','audit_logs','app_lock','settings','classes','class_names','class_permissions','rooms','students','placements','grants','exemptions','night_tasks','room_tasks','night_members','attendance_events','request_keys','followups','inspections','daily_reports','drafts','job_runs'];
 
     public function __construct(private PDO $db, private array $config) {}
 
@@ -159,7 +159,7 @@ final class Backup
                 if (!$stat || $stat['size']>65536) throw new ApiError('备份说明无效');
                 $manifest=json_decode($zip->getFromName('manifest.json'),true,64,JSON_THROW_ON_ERROR);
                 $driver=$this->db->getAttribute(PDO::ATTR_DRIVER_NAME);
-                if (($manifest['format'] ?? 0)!==2 || ($manifest['schema_version'] ?? null)!==1 || ($manifest['driver'] ?? '')!==$driver) throw new ApiError('备份格式、数据库类型或结构版本不兼容');
+                if (($manifest['format'] ?? 0)!==2 || ($manifest['schema_version'] ?? null)!==2 || ($manifest['driver'] ?? '')!==$driver) throw new ApiError('备份格式、数据库类型或结构版本不兼容');
                 $name='database.'.($driver==='sqlite'?'sqlite':'sql'); $stat=$zip->statName($name);
                 if (!$stat || $stat['size']>self::LIMIT) throw new ApiError('备份数据库条目无效或过大');
                 $stream=$zip->getStream($name); $target=fopen($dir.'/'.$name,'xb');
@@ -206,6 +206,7 @@ final class Backup
         Support::exec($this->db,"UPDATE users SET status=CASE WHEN status='disabled' THEN 'disabled' ELSE 'pending' END,password_hash=NULL,auth_version=auth_version+1,totp_secret=NULL,totp_enabled=0,totp_last_step=-1,updated_at=?",[Support::now()]);
         foreach (['auth_tokens','recovery_codes','rate_limits','request_keys','drafts'] as $table) $this->db->exec('DELETE FROM '.$table);
         Support::exec($this->db,'UPDATE grants SET revoked_at=? WHERE revoked_at IS NULL',[Support::now()]);
+        Support::exec($this->db,'UPDATE class_permissions SET revoked_at=? WHERE revoked_at IS NULL',[Support::now()]);
         Audit::write($this->db,null,'maintenance.restore',['backup_created_at'=>$manifest['created_at'],'restored_at'=>Support::now(),'credentials_revoked'=>true,'grants_revoked'=>true]);
     }
 }

@@ -32,14 +32,15 @@ function originOf(string $url): ?string
 try {
     $statelessPublic=($_SERVER['REQUEST_METHOD'] ?? 'GET')==='GET' && in_array($_GET['action'] ?? '',['public_settings','public.settings'],true);
     [$config,$db]=require dirname(__DIR__,2).'/src/bootstrap.php';
+    if ((int)DormCheck\Schema::get($db,'schema_version',0)!==2) throw new ApiError('数据库需要升级，请联系维护人员','MIGRATION_REQUIRED',503);
     $action=$_GET['action'] ?? 'session';
     if (!is_string($action) || !preg_match('/^[a-z][a-z_.]{0,63}$/D',$action)) throw new ApiError('接口不存在','NOT_FOUND',404);
     $action=str_replace('.','_',$action);
-    $reads=['session','public_settings','tasks','task_history','dashboard','reports','followups','inspections','roster','grants','settings','audit','draft_get'];
+    $reads=['session','public_settings','tasks','task_history','dashboard','reports','followups','inspections','roster','settings','audit','draft_get','classes'];
     $authActions=['session','login','activate','reset_password','logout','logout_all','change_password','totp_setup','totp_confirm','reauth'];
     $userActions=['user_create','user_reset','user_status','users_list'];
     $quickActions=['quick_lookup','quick_initial','quick_update'];
-    $domainActions=['prepare_today','tasks','task_history','dashboard','reports','followups','inspections','roster','grants','settings','audit','draft_get','draft_save','report_initial','report_update','report_correct','report_snapshot','export','followup_save','inspection_save','import_preview','import_commit','student_retire','grant_save','grant_revoke','exemption_save','exemption_revoke','settings_save','task_close','task_reopen','task_roster_adjust'];
+    $domainActions=['classes','class_create','class_rename','class_permissions_save','room_leader_change','prepare_today','tasks','task_history','dashboard','reports','followups','inspections','roster','settings','audit','draft_get','draft_save','report_initial','report_update','report_correct','report_snapshot','export','followup_save','inspection_save','import_preview','import_commit','student_retire','exemption_save','exemption_revoke','settings_save','task_close','task_reopen','task_roster_adjust'];
     if (!in_array($action,array_merge(['public_settings'],$authActions,$userActions,$domainActions,$quickActions),true)) throw new ApiError('接口不存在','NOT_FOUND',404);
     $method=$_SERVER['REQUEST_METHOD'] ?? 'GET';
     $expected=in_array($action,$reads,true)?'GET':'POST';

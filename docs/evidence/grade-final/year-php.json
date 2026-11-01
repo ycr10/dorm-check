@@ -1,0 +1,88 @@
+{
+  "passed": 19,
+  "failed": 0,
+  "results": [
+    {
+      "name": "新库建立稳定班级并移除宿舍长账号创建",
+      "ok": true
+    },
+    {
+      "name": "单班只能查看自身学生和班级",
+      "ok": true
+    },
+    {
+      "name": "跨班混住宿舍任务只显示授权成员",
+      "ok": true
+    },
+    {
+      "name": "不可选择未授权班级或更改他班成员",
+      "ok": true
+    },
+    {
+      "name": "班委不得结项或调整混住宿舍整体",
+      "ok": true
+    },
+    {
+      "name": "班委初报只影响本人班级",
+      "ok": true
+    },
+    {
+      "name": "快捷入口读取整寝并完成余下人员",
+      "ok": true
+    },
+    {
+      "name": "最新和固定日报只包含当前授权学生",
+      "ok": true
+    },
+    {
+      "name": "班级 Excel 导出不包含其他班级学生",
+      "ok": true
+    },
+    {
+      "name": "幂等重试保留原结果且授权变化后拒绝旧缓存",
+      "ok": true
+    },
+    {
+      "name": "负责人交接只改变当前关系并保护历史快照",
+      "ok": true
+    },
+    {
+      "name": "跨班转入不得绕过原班授权",
+      "ok": true
+    },
+    {
+      "name": "撤销授权立即限制读取",
+      "ok": true
+    },
+    {
+      "name": "旧版迁移保留记录并停用宿舍长",
+      "ok": true
+    },
+    {
+      "name": "年级版默认日期在八点切换且不补造旧任务",
+      "ok": true
+    },
+    {
+      "name": "旧库班名冲突时迁移预检安全停止",
+      "ok": true
+    },
+    {
+      "name": "明确映射历史班名并保留冻结前的住宿历史",
+      "ok": true
+    },
+    {
+      "name": "年级备份恢复保留业务数据并撤销旧班级授权",
+      "ok": true
+    },
+    {
+      "name": "篡改的年级备份不会覆盖当前数据",
+      "ok": true
+    }
+  ],
+  "lint": {
+    "linted": 15,
+    "php": "8.5.10",
+    "sapi": "wasm"
+  },
+  "scope": "Isolated direct-component SQLite tests in PHP WASM; not native CLI, Argon2id login, MySQL or production verification."
+}

@@ -19,17 +19,23 @@ final class Reports
             $inspections=Support::all($db,'SELECT * FROM inspections WHERE task_id=? ORDER BY id',[$night['id']]);
             $latest=[];
             foreach ($followups as $f) $latest[$f['student_id']]=$f;
+            $exemptions=[];
+            foreach (Support::all($db,'SELECT student_id,id,start_date,end_date,source,note,created_at FROM exemptions WHERE start_date<=? AND end_date>=? AND revoked_at IS NULL ORDER BY id DESC',[$date,$date]) as $e) if (!isset($exemptions[$e['student_id']])) { $id=$e['student_id']; unset($e['student_id']); $exemptions[$id]=$e; }
+            $countsByRoom=[];
             $people=Support::all($db,'SELECT m.*,r.building,r.room_number,r.leader_no,r.leader_name,r.submitted_at,r.late,r.report_version,r.roster_version FROM night_members m JOIN room_tasks r ON r.task_id=m.task_id AND r.room_id=m.room_id WHERE m.task_id=? AND m.included=1 ORDER BY r.building,r.room_number,m.student_no',[$night['id']]);
             foreach ($people as &$p) {
                 $p['task_id']=$p['task_id'].'.'.$p['room_id']; $p['student_id']=(int)$p['student_id']; $p['room_id']=(int)$p['room_id'];
                 $p['room']=$p['building'].' · '.$p['room_number']; $p['status']=$p['current_status'];
                 $p['frozen_exemption']=$p['exemption_json']?json_decode($p['exemption_json'],true,512,JSON_THROW_ON_ERROR):null;
-                $p['exemption']=Support::one($db,'SELECT id,start_date,end_date,source,note,created_at FROM exemptions WHERE student_id=? AND start_date<=? AND end_date>=? AND revoked_at IS NULL ORDER BY id DESC LIMIT 1',[$p['student_id'],$date,$date]);
+                $p['exemption']=$exemptions[$p['student_id']] ?? null;
                 $p['followup_state']=$latest[$p['student_id']]['state'] ?? 'pending'; $p['followup_note']=$latest[$p['student_id']]['note'] ?? '';
                 $p['followup_actor']=$latest[$p['student_id']]['actor_name'] ?? '';
                 $metrics['total']++;
                 if (!array_key_exists($p['current_status'],self::LABELS)) throw new \RuntimeException('Unknown attendance projection');
                 $metrics[$p['current_status']]++;
+                $roomId=$p['room_id'];
+                if (!isset($countsByRoom[$roomId])) $countsByRoom[$roomId]=['total'=>0,'present'=>0,'away'=>0,'exempt'=>0,'unknown'=>0,'unreported'=>0];
+                $countsByRoom[$roomId]['total']++; $countsByRoom[$roomId][$p['current_status']]++;
                 unset($p['exemption_json']);
             }
             unset($p);
@@ -38,7 +44,7 @@ final class Reports
                 $r['room_id']=(int)$r['room_id']; $r['late']=(bool)$r['late'];
                 $r['responsible']=json_decode($r['responsible_json'],true,512,JSON_THROW_ON_ERROR); unset($r['responsible_json']);
                 $counts=['total'=>0,'present'=>0,'away'=>0,'exempt'=>0,'unknown'=>0,'unreported'=>0];
-                foreach ($people as $p) if ($p['room_id']===$r['room_id']) { $counts['total']++; $counts[$p['current_status']]++; }
+                $counts=$countsByRoom[$r['room_id']] ?? $counts;
                 $r['metrics']=$counts; $r['roster_empty']=$counts['total']===0;
                 if (!$r['roster_empty']) {
                     $metrics['rooms_total']++;
@@ -61,7 +67,59 @@ final class Reports
         elseif ($metrics['exempt']>0) $arrival='应归人员已到齐，另有 '.$metrics['exempt'].' 人获准不返寝';
         else $arrival='全员在寝';
         $summary="{$date} 晚查寝，截至 {$now}：名册 {$metrics['total']} 人，已在寝 {$metrics['present']} 人，外出未归 {$metrics['away']} 人，待核实 {$metrics['unknown']} 人，未登记 {$metrics['unreported']} 人，已核实无需返寝 {$metrics['exempt']} 人；寝室初报 {$metrics['rooms_submitted']}/{$metrics['rooms_total']}，其中迟报 {$metrics['late_rooms']} 间。{$arrival}。";
-        return ['business_date'=>$date,'as_of'=>$now,'version'=>'latest','class_name'=>Schema::get($db,'class_name',''),'metrics'=>$metrics,'people'=>$people,'rooms'=>$rooms,'events'=>$events,'followups'=>$followups,'inspections'=>$inspections,'summary_text'=>$summary,'arrival_summary'=>$arrival,'frozen_at'=>$night['frozen_at'] ?? null,'check_at'=>$night['check_at'] ?? null,'due_at'=>$night['due_at'] ?? null,'delayed_freeze'=>(bool)($night['delayed'] ?? false),'phase'=>$night['phase'] ?? 'missing'];
+        return ['business_date'=>$date,'as_of'=>$now,'version'=>'latest','class_name'=>Schema::get($db,'grade_name','全年级'),'metrics'=>$metrics,'people'=>$people,'rooms'=>$rooms,'events'=>$events,'followups'=>$followups,'inspections'=>$inspections,'summary_text'=>$summary,'arrival_summary'=>$arrival,'frozen_at'=>$night['frozen_at'] ?? null,'check_at'=>$night['check_at'] ?? null,'due_at'=>$night['due_at'] ?? null,'delayed_freeze'=>(bool)($night['delayed'] ?? false),'phase'=>$night['phase'] ?? 'missing'];
+    }
+
+    /** Project historical snapshots through current class authorization, without mutating the snapshot. */
+    public static function scoped(PDO $db, array $report, ?array $scope): array
+    {
+        if ($scope===null) return $report;
+        $names=[];
+        foreach (Support::all($db,'SELECT name,class_id FROM class_names') as $row) if (in_array((int)$row['class_id'],$scope,true)) $names[$row['name']]=true;
+        $people=array_values(array_filter($report['people'] ?? [],fn($p)=>isset($names[(string)($p['class_name'] ?? '')])));
+        $ids=array_map(fn($p)=>(int)$p['student_id'],$people);
+        $events=array_values(array_filter($report['events'] ?? [],fn($e)=>isset($e['student_id']) && in_array((int)$e['student_id'],$ids,true)));
+        $followups=array_values(array_filter($report['followups'] ?? [],fn($f)=>in_array((int)($f['student_id'] ?? 0),$ids,true)));
+        $metrics=['total'=>0,'present'=>0,'away'=>0,'exempt'=>0,'unknown'=>0,'unreported'=>0,'rooms_total'=>0,'rooms_submitted'=>0,'rooms_pending'=>0,'late_rooms'=>0];
+        $byRoom=[];
+        foreach ($people as &$p) {
+            $status=$p['current_status'];
+            if (!array_key_exists($status,self::LABELS)) throw new \RuntimeException('Unknown attendance projection');
+            $metrics['total']++; $metrics[$status]++; $byRoom[(int)$p['room_id']][]=$p;
+            $initialEvents=array_values(array_filter($events,fn($e)=>(int)$e['student_id']===(int)$p['student_id'] && $e['type']==='initial'));
+            $p['submitted_at']=$initialEvents ? end($initialEvents)['recorded_at'] : null;
+            $p['late']=$p['submitted_at']!==null && !empty($report['due_at']) && $p['submitted_at']>$report['due_at'];
+            $p['leader_no']=''; $p['leader_name']='';
+        }
+        unset($p);
+        // Rebuild room groups after projecting member-level information.
+        $byRoom=[]; foreach ($people as $p) $byRoom[(int)$p['room_id']][]=$p;
+        $rooms=[];
+        foreach ($report['rooms'] ?? [] as $r) {
+            $members=$byRoom[(int)$r['room_id']] ?? [];
+            if (!$members) continue;
+            $counts=['total'=>count($members),'present'=>0,'away'=>0,'exempt'=>0,'unknown'=>0,'unreported'=>0];
+            foreach ($members as $p) $counts[$p['current_status']]++;
+            $done=!array_filter($members,fn($p)=>$p['initial_status']==='unreported' && empty($p['corrected_initial_status']));
+            $times=array_values(array_filter(array_column($members,'submitted_at'))); sort($times);
+            $r['submitted_at']=$done?($times ? end($times) : ($report['as_of'] ?? null)):null;
+            $r['late']=(bool)array_filter($members,fn($p)=>$p['late']);
+            $r['updated_at']=max(array_column($members,'updated_at'));
+            $r['leader_no']=''; $r['leader_name']=''; $r['responsible']=[]; $r['metrics']=$counts; $r['roster_empty']=false;
+            $metrics['rooms_total']++; $metrics[$done?'rooms_submitted':'rooms_pending']++; if ($r['late']) $metrics['late_rooms']++;
+            $rooms[]=$r;
+        }
+        $metrics['students_total']=$metrics['total']; $metrics['submitted_rooms']=$metrics['rooms_submitted']; $metrics['expected_rooms']=$metrics['rooms_total'];
+        $arrival=$metrics['total']===0?'尚无当晚名册，不能判断到齐':(($metrics['away']+$metrics['unknown']+$metrics['unreported'])>0?'仍有未归、待核实或未登记情况':($metrics['exempt']>0?'应归人员已到齐，另有 '.$metrics['exempt'].' 人获准不返寝':'全员在寝'));
+        $date=$report['business_date']; $asOf=$report['as_of'];
+        $summary="{$date} 晚查寝，截至 {$asOf}：名册 {$metrics['total']} 人，已在寝 {$metrics['present']} 人，外出未归 {$metrics['away']} 人，待核实 {$metrics['unknown']} 人，未登记 {$metrics['unreported']} 人，已核实无需返寝 {$metrics['exempt']} 人；涉及寝室初报 {$metrics['rooms_submitted']}/{$metrics['rooms_total']}。{$arrival}。";
+        $classes=Support::all($db,'SELECT id,name FROM classes ORDER BY name');
+        $labels=array_column(array_values(array_filter($classes,fn($c)=>in_array((int)$c['id'],$scope,true))),'name');
+        $report['class_name']=implode('、',$labels); $report['people']=$people; $report['events']=$events; $report['followups']=$followups; $report['inspections']=[]; $report['rooms']=$rooms; $report['metrics']=$metrics; $report['summary_text']=$summary; $report['arrival_summary']=$arrival;
+        unset($report['reason']);
+        if (isset($report['versions'])) foreach ($report['versions'] as &$v) $v['label']='固定版本 '.$v['version'];
+        unset($v);
+        return $report;
     }
 
     public static function versions(PDO $db, string $date): array

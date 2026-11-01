@@ -4,7 +4,7 @@ declare(strict_types=1);
 return [
     'env' => 'production',
     'app_url' => 'https://dorm.example.edu',
-    'class_name' => '电科一班',
+    'class_name' => '示例班级',
     'timezone' => 'Asia/Shanghai',
     'check_time' => '22:30',
     'due_time' => '22:35',

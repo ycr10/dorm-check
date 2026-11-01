@@ -7,6 +7,7 @@ use DormCheck\Auth;
 use DormCheck\Backup;
 use DormCheck\Database;
 use DormCheck\Domain;
+use DormCheck\Grade;
 use DormCheck\Schema;
 use DormCheck\Security;
 use DormCheck\Support;
@@ -14,6 +15,7 @@ use DormCheck\Support;
 if (PHP_SAPI!=='cli') { http_response_code(404); exit; }
 require_once dirname(__DIR__).'/src/Core.php';
 require_once dirname(__DIR__).'/src/Schema.php';
+require_once dirname(__DIR__).'/src/Grade.php';
 require_once dirname(__DIR__).'/src/Auth.php';
 require_once dirname(__DIR__).'/src/Xlsx.php';
 require_once dirname(__DIR__).'/src/Reports.php';
@@ -38,6 +40,19 @@ function requireOptions(array $options, array $allowed): void
     foreach ($options as $key=>$v) if (!in_array($key,$allowed,true)) throw new ApiError('不支持的参数：--'.$key);
 }
 
+function migrationMap(array $args): ?array
+{
+    if (!isset($args['map-file'])) return null;
+    $path=$args['map-file'];
+    if ($path==='' || !is_file($path) || is_link($path) || filesize($path)>262144) throw new ApiError('映射文件无效或超过 256 KB');
+    try { $object=json_decode((string)file_get_contents($path),false,64,JSON_THROW_ON_ERROR); }
+    catch (JsonException) { throw new ApiError('映射文件必须为 UTF-8 JSON 对象'); }
+    if (!$object instanceof stdClass) throw new ApiError('映射文件必须是历史班名到目标班名的 JSON 对象');
+    $mapping=get_object_vars($object);
+    foreach ($mapping as $name=>$target) if (!is_string($target)) throw new ApiError('每个映射目标都必须是班级名称');
+    return $mapping;
+}
+
 function checks(array $config, ?PDO $db = null): array
 {
     $driver=str_starts_with($config['db_dsn'],'sqlite:')?'sqlite':'mysql';
@@ -50,7 +65,7 @@ function checks(array $config, ?PDO $db = null): array
     $items[]=['check'=>'storage writable','ok'=>is_dir($config['storage_path']) && is_writable($config['storage_path'])];
     $items[]=['check'=>'production HTTPS URL','ok'=>$config['env']!=='production' || str_starts_with($config['app_url'],'https://')];
     if ($db) {
-        $items[]=['check'=>'schema version','ok'=>Schema::get($db,'schema_version')===1];
+        $items[]=['check'=>'schema version','ok'=>Schema::get($db,'schema_version')===2];
         if ($driver==='mysql') {
             $engines=Support::all($db,'SELECT ENGINE FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE()');
             $items[]=['check'=>'MySQL transactional tables','ok'=>count($engines)>0 && count(array_filter($engines,fn($e)=>strtoupper((string)$e['ENGINE'])!=='INNODB'))===0];
@@ -101,7 +116,7 @@ function init(array $args): array
 try {
     $command=$argv[1] ?? 'help'; $args=options(array_slice($argv,2));
     if ($command==='help') {
-        output(['commands'=>['init --env=development --url=http://127.0.0.1:8765 --db=sqlite --class=示例班级','doctor','migrate','user:create --student-no=本人学号 --name=姓名 --role=admin|committee|leader','user:reset --student-no=本人学号','user:disable --student-no=本人学号','mfa:reset --student-no=已核实学号','demo','tick','backup --output=新备份完整路径.dcb','maintenance:on','restore --input=备份完整路径.dcb --confirm=RESTORE','maintenance:off --confirm=REVIEWED','prune --before=YYYY-MM-DD --confirm=PRUNE']]); exit;
+        output(['commands'=>['init --env=development --url=http://127.0.0.1:8765 --db=sqlite --class=示例班级','doctor','migrate:preview','migrate --confirm=GRADE','user:create --student-no=本人学号 --name=姓名 --role=admin|committee','user:reset --student-no=本人学号','user:disable --student-no=本人学号','mfa:reset --student-no=已核实学号','demo','tick','backup --output=新备份完整路径.dcb','maintenance:on','restore --input=备份完整路径.dcb --confirm=RESTORE','maintenance:off --confirm=REVIEWED','prune --before=YYYY-MM-DD --confirm=PRUNE']]); exit;
     }
     if ($command==='init') { output(init($args)); exit; }
     [$config,$db]=require dirname(__DIR__).'/src/bootstrap.php';
@@ -111,13 +126,15 @@ try {
             requireOptions($args,[]); $items=checks($config,$db);
             $ok=count(array_filter($items,fn($i)=>!$i['ok'] && !($i['warning'] ?? false)))===0;
             output(['ok'=>$ok,'php_version'=>PHP_VERSION,'environment'=>$config['env'],'checks'=>$items,'maintenance'=>is_file($config['storage_path'].'/maintenance.json'),'job_runs'=>Support::all($db,'SELECT * FROM job_runs ORDER BY id DESC LIMIT 5'),'note'=>'CLI 检查不代表 PHP-FPM、HTTPS、MySQL、浏览器或恢复演练已经通过。Windows 重建包还须核对官方包名及 SHA-256。']); exit($ok?0:1);
+        case 'migrate:preview':
+            requireOptions($args,['map-file']); output(Grade::preview($db,migrationMap($args))); break;
         case 'migrate':
-            requireOptions($args,[]);
-            if (Schema::get($db,'schema_version',0)>1) throw new ApiError('数据库版本高于此程序，禁止降级迁移');
-            $domain->install(); output(['ok'=>true,'schema_version'=>1]); break;
+            requireOptions($args,['confirm','map-file']);
+            if (($args['confirm'] ?? '')!=='GRADE' || !is_file($config['storage_path'].'/maintenance.json')) throw new ApiError('请先备份并启用维护模式，再使用 --confirm=GRADE');
+            Grade::install($db,migrationMap($args)); output(['ok'=>true,'schema_version'=>2]); break;
         case 'user:create':
             requireOptions($args,['student-no','name','role']);
-            output($auth->createUser(Support::text($args['student-no'] ?? '',64),Support::text($args['name'] ?? '',100),$args['role'] ?? 'leader')); break;
+            output($auth->createUser(Support::text($args['student-no'] ?? '',64),Support::text($args['name'] ?? '',100),$args['role'] ?? 'committee')); break;
         case 'user:reset':
         case 'user:disable':
         case 'mfa:reset':

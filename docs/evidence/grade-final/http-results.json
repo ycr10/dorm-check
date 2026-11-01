@@ -1,0 +1,55 @@
+{
+  "passed": 12,
+  "failed": 0,
+  "scope": "Unauthenticated real HTTP/session/security boundary only; not proof of successful Argon2id login or authenticated browser workflows.",
+  "results": [
+    {
+      "name": "public page and local assets render with security headers",
+      "ok": true
+    },
+    {
+      "name": "anonymous session issues private CSRF and HttpOnly SameSite cookie",
+      "ok": true
+    },
+    {
+      "name": "wrong methods never perform state changes",
+      "ok": true
+    },
+    {
+      "name": "missing CSRF is rejected before login processing",
+      "ok": true
+    },
+    {
+      "name": "cross-site writes are rejected even with a valid CSRF token",
+      "ok": true
+    },
+    {
+      "name": "non-JSON and malformed JSON fail with controlled errors",
+      "ok": true
+    },
+    {
+      "name": "authenticated reads and mutations reject an anonymous client",
+      "ok": true
+    },
+    {
+      "name": "failed login and activation do not disclose an account or stack trace",
+      "ok": true
+    },
+    {
+      "name": "private directories, arbitrary PHP and traversal paths are not served",
+      "ok": true
+    },
+    {
+      "name": "quick entry remains a same-origin CSRF-protected POST and cannot unlock private APIs",
+      "ok": true
+    },
+    {
+      "name": "filing settings are public, stateless and contain no private settings",
+      "ok": true
+    },
+    {
+      "name": "invalid query arrays and unknown action names are controlled",
+      "ok": true
+    }
+  ]
+}
