@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#f5f5f7">
+  <meta name="description" content="归寝，班级晚间查寝与安全返寝登记。">
+  <title>归寝 · 晚间查寝</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='17' fill='%230071e3'/%3E%3Cpath d='M44 38A19 19 0 0 1 26 16a20 20 0 1 0 24 25 18 18 0 0 1-6-3Z' fill='white'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="assets/app.css">
+  <link rel="stylesheet" href="assets/enhancements.css">
+  <script src="assets/app.js?v=20261029-totp-account" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">跳到主要内容</a>
+  <div id="app" aria-busy="true">
+    <div class="boot-screen"><span class="boot-mark">归</span><p>正在连接归寝…</p></div>
+  </div>
+  <div id="toasts" class="toast-stack" aria-live="polite" aria-atomic="false"></div>
+  <dialog id="modal" class="modal"></dialog>
+  <noscript><p class="noscript">请启用浏览器 JavaScript 以使用安全登录和查寝登记。</p></noscript>
+</body>
+</html>

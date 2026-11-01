@@ -1,0 +1,13 @@
+/* Keep status meaning on labeled icons; values remain readable in neutral ink. */
+.metric-card .metric-number,.metric-card.green .metric-number,.metric-card.orange .metric-number,.metric-card.red .metric-number,.count-display{color:var(--text);font-family:inherit;font-variant-numeric:proportional-nums}
+.metric-card.green .metric-label svg{color:var(--green)}
+.metric-card.orange .metric-label svg{color:var(--orange)}
+.metric-card.red .metric-label svg{color:var(--red)}
+.event-data{max-width:100%;max-height:22rem;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;padding:14px;border:1px solid var(--line);border-radius:12px;background:var(--surface-soft);color:var(--text);font-size:12px;line-height:1.6}
+.timeline-content details{margin-top:8px}
+.timeline-content summary{cursor:pointer;color:var(--muted)}
+.table-wrap .field{margin-top:10px}
+.table-wrap input[type=datetime-local]{min-width:180px;max-width:100%;font-size:12px}
+.table-wrap .field-label{font-size:11px;color:var(--muted)}
+@media(forced-colors:active){.tag,.member-pill,.notice,.metric-card{border:1px solid CanvasText}.dot{border:1px solid CanvasText}}
+@media print{.tag,.member-pill,.metric-card{border:1px solid currentColor}.event-data{max-height:none;overflow:visible}}

@@ -1,0 +1,13 @@
+# Temporary HTTP-only configuration for obtaining the first TLS certificate.
+# It exposes ACME challenges only; it does not expose the application.
+server {
+    listen 80;
+    listen [::]:80;
+    server_name dorm.example.com;
+    location ^~ /.well-known/acme-challenge/ {
+        root /var/www/acme;
+    }
+    location / {
+        return 404;
+    }
+}

@@ -1,0 +1,74 @@
+{
+  "scope": "Pre-authenticated synthetic sessions for UI/business integration only. Password activation/login and MFA enrollment are not proved.",
+  "passed": 15,
+  "failed": 1,
+  "results": [
+    {
+      "name": "real login page renders, tabs and dark/mobile layout work",
+      "ok": true
+    },
+    {
+      "name": "leader initial form saves/restores a server draft then submits all members",
+      "ok": true
+    },
+    {
+      "name": "leader return update preserves original initial and exposes full event history",
+      "ok": true
+    },
+    {
+      "name": "manager dashboard shows real counts, escaped names and searchable people",
+      "ok": true
+    },
+    {
+      "name": "manager followup and inspection persist without faking presence",
+      "ok": true
+    },
+    {
+      "name": "fixed report and authenticated six-sheet workbook download work in browser",
+      "ok": true
+    },
+    {
+      "name": "roster account creation and verified-exemption form use real API",
+      "ok": true
+    },
+    {
+      "name": "settings and audit render, sensitive credentials are not in audit UI",
+      "ok": true
+    },
+    {
+      "name": "admin batch-confirm initial and task close/reopen are usable",
+      "ok": true
+    },
+    {
+      "name": "frozen roster adjustment requires a reason and records a new version",
+      "ok": true
+    },
+    {
+      "name": "explicit current-roster retirement preserves the frozen nightly report",
+      "ok": true
+    },
+    {
+      "name": "revoking leader scope immediately removes access from their old session",
+      "ok": true
+    },
+    {
+      "name": "committee cannot access admin settings or audit, logout clears private UI",
+      "ok": true
+    },
+    {
+      "name": "TOTP account settings validate the student number, preserve the legacy policy on failure and explain the single-account transition",
+      "ok": true
+    },
+    {
+      "name": "saving the TOTP account revokes old sessions, preserves the owner and removes committee MFA in the real UI",
+      "ok": true
+    },
+    {
+      "name": "browser has no unexpected script/CSP errors",
+      "ok": false,
+      "errors": [
+        "Pattern attribute value [A-Za-z0-9_-]{3,64} is not a valid regular expression: Uncaught SyntaxError: Failed to execute 'click' on 'HTMLElement': Invalid regular expression: /[A-Za-z0-9_-]{3,64}/v: Invalid character in character class"
+      ]
+    }
+  ]
+}

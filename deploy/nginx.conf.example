@@ -1,0 +1,56 @@
+# Replace the hostname, project path, PHP-FPM socket and certificate paths.
+# Obtain the certificate before enabling the TLS server block.
+server {
+    listen 80;
+    listen [::]:80;
+    server_name dorm.example.com;
+    location ^~ /.well-known/acme-challenge/ {
+        root /var/www/acme;
+    }
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}
+
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    server_name dorm.example.com;
+    root /var/www/dorm-check/public;
+    index index.html;
+
+    ssl_certificate /etc/letsencrypt/live/dorm.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/dorm.example.com/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_session_tickets off;
+    client_max_body_size 3m;
+    autoindex off;
+
+    add_header X-Content-Type-Options nosniff always;
+    add_header Referrer-Policy no-referrer always;
+    add_header X-Frame-Options DENY always;
+    add_header Permissions-Policy "camera=(), microphone=(), geolocation=()" always;
+    add_header Content-Security-Policy "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; form-action 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'" always;
+    # Enable after HTTPS and renewal are verified:
+    # add_header Strict-Transport-Security "max-age=31536000" always;
+
+    location / {
+        try_files $uri $uri/ =404;
+    }
+
+    location = /api/index.php {
+        include fastcgi_params;
+        fastcgi_param SCRIPT_FILENAME $document_root/api/index.php;
+        fastcgi_param HTTPS on;
+        fastcgi_pass unix:/run/php/php8.5-fpm.sock;
+        fastcgi_read_timeout 30s;
+    }
+
+    location ~ \.php(?:/|$) {
+        return 404;
+    }
+    location ~ /\. {
+        deny all;
+    }
+}
+
